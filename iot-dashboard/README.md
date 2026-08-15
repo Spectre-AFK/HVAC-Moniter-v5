@@ -1,16 +1,72 @@
-# React + Vite
+# HVAC Telemetry Hub
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+A React + Vite dashboard for monitoring live temperature data streamed from ESP32 edge devices, backed by Supabase for authentication and storage.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Authenticated access** — email/password sign-in via Supabase Auth; the dashboard is hidden until a session exists.
+- **Live temperature readout** — current reading (converted from °C to °F) with a color-coded status (cold/normal/hot).
+- **Multi-sensor support** — switch between individual sensors detected in the incoming data.
+- **Rolling statistics** — max, average, and min temperature over the last 100 readings per sensor.
+- **Historical trend chart** — area chart (via Recharts) of recent readings over time.
+- **Auto-refresh** — polls Supabase every 10 seconds, with a manual "force sync" button.
 
-## React Compiler
+## Tech Stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- [React 19](https://react.dev/) + [Vite](https://vitejs.dev/)
+- [Supabase](https://supabase.com/) (`@supabase/supabase-js`) for auth and data
+- [Recharts](https://recharts.org/) for charting
+- [Tailwind CSS](https://tailwindcss.com/) for styling
+- [lucide-react](https://lucide.dev/) for icons
+- [Oxlint](https://oxc.rs/) for linting
 
-## Expanding the Oxlint configuration
+## Getting Started
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+### Prerequisites
+
+- Node.js (LTS recommended)
+- A Supabase project with:
+  - Auth enabled (email/password)
+  - A `sensor_data` table with at least: `sensor_index`, `temperature_c`, `timestamp`
+
+### Install & Run
+
+```bash
+npm install
+cp .env.example .env   # then fill in your Supabase project values
+npm run dev
+```
+
+The app will be available at the local URL printed by Vite (typically `http://localhost:5173`).
+
+### Other Scripts
+
+| Command           | Description                    |
+| ----------------- | ------------------------------- |
+| `npm run dev`     | Start the Vite dev server        |
+| `npm run build`   | Build for production             |
+| `npm run preview` | Preview the production build     |
+| `npm run lint`    | Run Oxlint                       |
+
+## Configuration
+
+Supabase connection details are read from environment variables (see [src/App.jsx](src/App.jsx)):
+
+| Variable                    | Description                          |
+| --------------------------- | ------------------------------------- |
+| `VITE_SUPABASE_URL`         | Your Supabase project URL             |
+| `VITE_SUPABASE_ANON_KEY`    | Your Supabase anonymous/publishable key |
+
+## Project Structure
+
+```
+iot-dashboard/
+├── public/           # Static assets (favicon, icons)
+├── src/
+│   ├── App.jsx       # Main dashboard UI, auth, and data-fetching logic
+│   ├── App.css
+│   ├── index.css     # Tailwind entry point
+│   └── main.jsx      # React entry point
+├── index.html
+└── vite.config.js
+```

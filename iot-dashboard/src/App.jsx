@@ -9,8 +9,13 @@ import {
 } from 'lucide-react';
 
 // --- Configuration ---
-const SUPABASE_URL = "https://swbcwtrijguodjaxyitm.supabase.co"; 
-const SUPABASE_ANON_KEY = "sb_publishable_iVV7-ht6QWT2cqYg_MxWfg_cdPRWd2Y"; 
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY environment variables. Copy .env.example to .env and fill in your Supabase project values.');
+}
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // --- Helper Functions ---
