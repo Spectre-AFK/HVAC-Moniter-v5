@@ -7,6 +7,7 @@ import {
 import { 
   Thermometer, Server, Activity, Clock, ShieldAlert, LogOut, Settings, Hash, RefreshCcw 
 } from 'lucide-react';
+import AdminPanel from './AdminPanel';
 
 // --- Configuration ---
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
@@ -45,6 +46,10 @@ export default function App() {
   const [sensorData, setSensorData] = useState([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [selectedSensor, setSelectedSensor] = useState(0);
+  const [view, setView] = useState('dashboard');
+
+  // Admins are marked via Supabase app_metadata, which users cannot edit themselves.
+  const isAdmin = session?.user?.app_metadata?.role === 'admin';
 
   // Authentication Setup
   const [email, setEmail] = useState('');
@@ -200,6 +205,19 @@ export default function App() {
               <Server className="w-4 h-4" />
               Supabase Connected
             </div>
+            {isAdmin && (
+              <button
+                onClick={() => setView(view === 'admin' ? 'dashboard' : 'admin')}
+                className={`p-2 rounded-lg transition-colors ${
+                  view === 'admin'
+                    ? 'bg-slate-900 text-amber-400'
+                    : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100'
+                }`}
+                title="Admin: Device Access"
+              >
+                <Settings className="w-5 h-5" />
+              </button>
+            )}
             <button 
               onClick={handleLogout}
               className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
@@ -214,6 +232,10 @@ export default function App() {
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         
+        {view === 'admin' && isAdmin ? (
+          <AdminPanel supabase={supabase} />
+        ) : (
+        <>
         {/* Header & Controls */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
           <div>
@@ -369,6 +391,8 @@ export default function App() {
               The system is connected to Supabase but no data has been received for Sensor {selectedSensor} yet.
             </p>
           </div>
+        )}
+        </>
         )}
       </main>
     </div>
