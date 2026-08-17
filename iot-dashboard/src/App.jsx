@@ -107,9 +107,17 @@ export default function App() {
     fetchData();
     // Only poll for fresh data when the end of the range is "live" (no fixed end date)
     if (!isLive) return;
-    const interval = setInterval(fetchData, 10000);
+    const interval = setInterval(fetchData, 60000);
     return () => clearInterval(interval);
   }, [session, startDate, endDate]);
+
+  // Ticks independently of data fetches so "time since last reading" stays accurate between polls
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!isLive) return;
+    const tick = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(tick);
+  }, [isLive]);
 
   const analytics = useMemo(() => {
     if (!sensorData.length) return null;
@@ -136,8 +144,31 @@ export default function App() {
     // Find unique sensors for the selector
     const uniqueSensors = [...new Set(sensorData.map(d => d.sensor_index))].sort();
 
-    return { latest, latestTempF, max, min, avg, chartData, uniqueSensors };
+    // Kept for staleness detection: each device may publish at a different rate
+    const recentTimestamps = filteredData.slice(0, 7).map(d => d.timestamp);
+
+    return { latest, latestTempF, max, min, avg, chartData, uniqueSensors, recentTimestamps };
   }, [sensorData, selectedSensor]);
+
+  // Infers this sensor's own publish interval from the gaps between its recent readings,
+  // rather than assuming a fixed rate shared by every device.
+  const staleness = useMemo(() => {
+    if (!analytics || !isLive) return null;
+
+    const timestamps = analytics.recentTimestamps.map(t => new Date(t).getTime());
+    const deltas = [];
+    for (let i = 0; i < timestamps.length - 1; i++) {
+      deltas.push(timestamps[i] - timestamps[i + 1]);
+    }
+    deltas.sort((a, b) => a - b);
+    const expectedIntervalMs = deltas.length ? deltas[Math.floor(deltas.length / 2)] : null;
+
+    // Allow some slack over the device's usual interval, with a floor so brief jitter isn't flagged
+    const staleThresholdMs = Math.max((expectedIntervalMs ?? 60000) * 2.5, 60000);
+    const msSinceLastReading = now - timestamps[0];
+
+    return { isStale: msSinceLastReading > staleThresholdMs, msSinceLastReading };
+  }, [analytics, isLive, now]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -333,9 +364,13 @@ export default function App() {
                     <Thermometer className={`w-6 h-6 ${getStatusColor(analytics.latestTempF)}`} />
                     <span className="font-semibold text-slate-900">Current Temperature</span>
                   </div>
-                  <div className="flex items-center gap-1.5 px-2.5 py-1 bg-white/60 rounded-full border border-slate-200/50 text-xs font-medium text-slate-600 backdrop-blur-sm">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    LIVE
+                  <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium backdrop-blur-sm ${
+                    staleness?.isStale
+                      ? 'bg-red-50/80 border-red-200 text-red-600'
+                      : 'bg-white/60 border-slate-200/50 text-slate-600'
+                  }`}>
+                    <span className={`w-2 h-2 rounded-full ${staleness?.isStale ? 'bg-red-500' : 'bg-emerald-500 animate-pulse'}`}></span>
+                    {staleness?.isStale ? 'STALE' : 'LIVE'}
                   </div>
                 </div>
                 

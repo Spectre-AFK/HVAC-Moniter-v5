@@ -26,7 +26,7 @@ DallasTemperature sensors[MAX_SENSORS] = { DallasTemperature(&oneWireBuses[0]), 
 
 // Timers and State Flags
 unsigned long lastMsgTime = 0;
-const long publishInterval = 5000; // Publish every 5 seconds
+const long publishInterval = 600000; // Publish every 10 minutes
 bool shouldSaveConfig = false;
 
 // ---------------------------------------------------------
