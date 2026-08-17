@@ -13,7 +13,7 @@
 #include "config.h"
 
 // Initialize Global Config with defaults
-Config appConfig = { "192.168.0.132", 1883, 1 }; 
+Config appConfig = { "192.168.0.132", 1883, 1, true };
 
 // Global Objects
 WiFiClient espClient;
@@ -21,8 +21,8 @@ PubSubClient mqttClient(espClient);
 // Unique per-device identifier (derived from MAC), used as both the MQTT client ID and payload device_id
 String deviceId;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-OneWire oneWire(ONE_WIRE_BUS);
-DallasTemperature sensors(&oneWire);
+OneWire oneWireBuses[MAX_SENSORS] = { OneWire(ONE_WIRE_PINS[0]), OneWire(ONE_WIRE_PINS[1]), OneWire(ONE_WIRE_PINS[2]), OneWire(ONE_WIRE_PINS[3]), OneWire(ONE_WIRE_PINS[4]) };
+DallasTemperature sensors[MAX_SENSORS] = { DallasTemperature(&oneWireBuses[0]), DallasTemperature(&oneWireBuses[1]), DallasTemperature(&oneWireBuses[2]), DallasTemperature(&oneWireBuses[3]), DallasTemperature(&oneWireBuses[4]) };
 
 // Timers and State Flags
 unsigned long lastMsgTime = 0;
@@ -47,6 +47,7 @@ void loadConfig() {
           strlcpy(appConfig.mqtt_server, doc["mqtt_server"] | "192.168.1.100", sizeof(appConfig.mqtt_server));
           appConfig.mqtt_port = doc["mqtt_port"] | 1883;
           appConfig.sensor_count = doc["sensor_count"] | 1;
+          appConfig.has_display = doc["has_display"] | true;
           Serial.println("Config loaded from LittleFS");
         }
         file.close();
@@ -60,6 +61,7 @@ void saveConfig() {
   doc["mqtt_server"] = appConfig.mqtt_server;
   doc["mqtt_port"] = appConfig.mqtt_port;
   doc["sensor_count"] = appConfig.sensor_count;
+  doc["has_display"] = appConfig.has_display;
 
   File file = LittleFS.open(CONFIG_FILE, "w");
   if (file) {
@@ -73,6 +75,8 @@ void saveConfig() {
 // OLED HELPER
 // ---------------------------------------------------------
 void updateDisplay(float temp0) {
+  if (!appConfig.has_display) return;
+
   display.clearDisplay();
   
   display.setTextSize(1);
@@ -127,17 +131,20 @@ void reconnect() {
 void setup() {
   Serial.begin(115200);
 
-  // 1. Initialize OLED
-  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    for(;;);
+  // 1. Initialize OLED (skip entirely on boards with no screen wired up)
+  if (appConfig.has_display) {
+    if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+      Serial.println(F("SSD1306 allocation failed"));
+      appConfig.has_display = false;
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+      display.clearDisplay();
+      display.setCursor(0,20);
+      display.setTextSize(1);
+      display.println("Starting Setup...");
+      display.display();
+    }
   }
-  display.setTextColor(SSD1306_WHITE);
-  display.clearDisplay();
-  display.setCursor(0,20);
-  display.setTextSize(1);
-  display.println("Starting Setup...");
-  display.display();
 
   // 2. Load Config from LittleFS
   loadConfig();
@@ -156,9 +163,14 @@ void setup() {
   itoa(appConfig.sensor_count, countStr, 10);
   WiFiManagerParameter custom_sensor_count("count", "Sensor Count (1-5)", countStr, 4);
 
+  char displayStr[2];
+  itoa(appConfig.has_display ? 1 : 0, displayStr, 10);
+  WiFiManagerParameter custom_has_display("display", "Has OLED Display (1=yes, 0=no)", displayStr, 2);
+
   wm.addParameter(&custom_mqtt_server);
   wm.addParameter(&custom_mqtt_port);
   wm.addParameter(&custom_sensor_count);
+  wm.addParameter(&custom_has_display);
 
   // 4. Captive Portal (Blocking loop until WiFi connects)
   if(!wm.autoConnect("Sensor WiFi Setup")) {
@@ -172,6 +184,7 @@ void setup() {
     strlcpy(appConfig.mqtt_server, custom_mqtt_server.getValue(), sizeof(appConfig.mqtt_server));
     appConfig.mqtt_port = atoi(custom_mqtt_port.getValue());
     appConfig.sensor_count = atoi(custom_sensor_count.getValue());
+    appConfig.has_display = atoi(custom_has_display.getValue()) != 0;
     saveConfig();
   }
 
@@ -181,7 +194,9 @@ void setup() {
 
   // 6. Setup MQTT, 1-Wire Sensors & NTP time (needed for real reading timestamps)
   mqttClient.setServer(appConfig.mqtt_server, appConfig.mqtt_port);
-  sensors.begin();
+  for (int i = 0; i < appConfig.sensor_count && i < MAX_SENSORS; i++) {
+    sensors[i].begin();
+  }
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
 }
 
@@ -198,8 +213,6 @@ void loop() {
   if (now - lastMsgTime > publishInterval) {
     lastMsgTime = now;
 
-    sensors.requestTemperatures(); 
-    
     // Create a JSON payload
     JsonDocument doc;
     doc["device_id"] = deviceId;
@@ -209,7 +222,8 @@ void loop() {
     float firstTemp = DEVICE_DISCONNECTED_C;
 
     for (int i = 0; i < appConfig.sensor_count; i++) {
-      float t = sensors.getTempCByIndex(i);
+      sensors[i].requestTemperatures(); // each sensor is on its own dedicated 1-Wire pin
+      float t = sensors[i].getTempCByIndex(0);
       if (t == DEVICE_DISCONNECTED_C) {
         tempArray.add(nullptr); // keep array position == sensor_index when a probe drops off the bus
       } else {

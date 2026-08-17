@@ -39,6 +39,12 @@ const getStatusBg = (tempF) => {
   return 'bg-amber-50 border-amber-200';
 };
 
+// Formats a Date as a local "yyyy-MM-ddTHH:mm" string for <input type="datetime-local">
+const toDateTimeLocal = (date) => {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
 // --- Main Application Component ---
 export default function App() {
   const [session, setSession] = useState(null);
@@ -47,6 +53,9 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [selectedSensor, setSelectedSensor] = useState(0);
   const [view, setView] = useState('dashboard');
+  const [startDate, setStartDate] = useState(() => toDateTimeLocal(new Date(Date.now() - 24 * 60 * 60 * 1000)));
+  const [endDate, setEndDate] = useState('');
+  const isLive = endDate === '';
 
   // Admins are marked via Supabase app_metadata, which users cannot edit themselves.
   const isAdmin = session?.user?.app_metadata?.role === 'admin';
@@ -74,11 +83,16 @@ export default function App() {
     setIsSyncing(true);
     
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('sensor_data')
         .select('*')
         .order('timestamp', { ascending: false })
-        .limit(100);
+        .limit(2000);
+
+      if (startDate) query = query.gte('timestamp', new Date(startDate).toISOString());
+      if (endDate) query = query.lte('timestamp', new Date(endDate).toISOString());
+
+      const { data, error } = await query;
 
       if (error) throw error;
       setSensorData(data || []);
@@ -91,10 +105,11 @@ export default function App() {
 
   useEffect(() => {
     fetchData();
-    // Poll every 10 seconds
+    // Only poll for fresh data when the end of the range is "live" (no fixed end date)
+    if (!isLive) return;
     const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
-  }, [session]);
+  }, [session, startDate, endDate]);
 
   const analytics = useMemo(() => {
     if (!sensorData.length) return null;
@@ -261,6 +276,38 @@ export default function App() {
                 ))}
               </div>
             )}
+            <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg shadow-sm px-3 py-1.5">
+              <label className="flex flex-col text-xs text-slate-400">
+                Start
+                <input
+                  type="datetime-local"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="text-sm font-medium text-slate-700 outline-none bg-transparent"
+                />
+              </label>
+              <label className="flex flex-col text-xs text-slate-400">
+                End
+                <input
+                  type="datetime-local"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  disabled={isLive}
+                  className="text-sm font-medium text-slate-700 outline-none bg-transparent disabled:text-slate-300"
+                />
+              </label>
+              <button
+                onClick={() => setEndDate(isLive ? toDateTimeLocal(new Date()) : '')}
+                className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
+                  isLive
+                    ? 'bg-slate-900 text-amber-400'
+                    : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100'
+                }`}
+                title="Toggle live end date"
+              >
+                LIVE
+              </button>
+            </div>
             <button 
               onClick={fetchData}
               className={`p-2 bg-white border border-slate-200 rounded-lg shadow-sm text-slate-600 hover:text-slate-900 transition-all ${isSyncing ? 'animate-spin' : ''}`}
@@ -326,7 +373,11 @@ export default function App() {
                 </div>
                 
                 <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
-                  <span>Based on last 100 readings</span>
+                  <span>
+                    {new Date(startDate).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                    {' → '}
+                    {isLive ? 'Live' : new Date(endDate).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                  </span>
                   <Hash className="w-4 h-4" />
                 </div>
               </div>
