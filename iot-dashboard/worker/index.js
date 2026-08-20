@@ -40,26 +40,45 @@ async function handleAnomalySummary(request, env) {
     return Response.json({ error: 'Too many flags' }, { status: 400 });
   }
 
+  const FLAG_TYPE_LABELS = {
+    zscore: 'outlier reading',
+    'trend-short': 'short-term trend (recent readings)',
+    'trend-long': 'long-term trend (extended history)',
+    flatline: 'flatline / stuck sensor',
+  };
+
   const bulletList = flags
-    .map((f) => `- Sensor ${f.sensorIndex} (${f.type}, severity: ${f.severity}): ${f.message}`)
+    .map((f) => `- Sensor ${f.sensorIndex} (${FLAG_TYPE_LABELS[f.type] ?? f.type}, severity: ${f.severity}): ${f.message}`)
     .join('\n');
 
   const messages = [
     {
       role: 'system',
       content:
-        'You are an HVAC monitoring assistant. You are given a list of anomalies already ' +
-        'detected by statistical rules (z-score, trend slope, or flatline checks) on ' +
-        'temperature sensor data. Summarize them for a service technician in 2-4 concise ' +
-        'sentences: what changed, a plausible HVAC cause, and whether it warrants a site ' +
-        'visit. Only use the data given to you — do not invent readings or timestamps.',
+        'You are an HVAC monitoring assistant that writes calm, neutral, strictly data-grounded ' +
+        'summaries for a service technician. You are given a list of anomalies already detected ' +
+        'by statistical rules (z-score, trend slope, or flatline checks) — you did not detect ' +
+        'these yourself and must not invent new ones or exaggerate them.\n\n' +
+        'Rules:\n' +
+        '- Reference only the specific numbers given (rate, degrees, hours, z-score). Do not use ' +
+        "escalating words like 'severe', 'critical', 'urgent', 'drastic', or 'high rate' — state " +
+        'the actual figure instead and let the reader judge.\n' +
+        '- You may name at most one plausible HVAC explanation per anomaly, always hedged ' +
+        "(e.g. 'could indicate', 'may suggest') — never state a cause as settled fact.\n" +
+        "- Only recommend a site visit if a flag's severity is 'high'. For 'medium' severity, say " +
+        "it's worth continued monitoring rather than urgent action.\n" +
+        "- If a sensor has both a short-term and long-term trend, say whether the recent change " +
+        "matches its longer pattern or is a new deviation from it.\n" +
+        '- 2-3 concise, neutral sentences. No exclamation marks.',
     },
     { role: 'user', content: bulletList },
   ];
 
   try {
-    const result = await env.AI.run(MODEL, { messages });
-    return Response.json({ summary: result.response ?? '' });
+    const result = await env.AI.run(MODEL, { messages, max_tokens: 512, temperature: 0.3 });
+    console.log('Workers AI raw result:', JSON.stringify(result));
+    const summary = typeof result === 'string' ? result : (result?.response ?? '');
+    return Response.json({ summary });
   } catch (err) {
     console.error('Workers AI request failed:', err);
     return Response.json({ error: 'AI summary failed' }, { status: 502 });

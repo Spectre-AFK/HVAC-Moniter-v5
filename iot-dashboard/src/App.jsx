@@ -13,11 +13,15 @@ import LandingPage from './LandingPage';
 import ThemeToggle from './ThemeToggle';
 import logo from './assets/logo.png';
 import { detectAnomalies } from './anomalyDetection';
+import { useTypewriter } from './useTypewriter';
 
 const COMPANY_NAME = 'Accurate Air Conditioning';
 const COMPANY_PHONE = '(520) 230-5453';
 const COMPANY_PHONE_HREF = 'tel:+15202305453';
 const COMPANY_EMAIL = 'contact@aaronjauregui.com';
+
+// Statistical anomaly detection stays on; the LLM summary is disabled for now (overkill for current needs).
+const AI_SUMMARY_ENABLED = false;
 
 // --- Configuration ---
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
@@ -79,6 +83,7 @@ export default function App() {
   const [aiSummary, setAiSummary] = useState('');
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [summaryError, setSummaryError] = useState('');
+  const typedSummary = useTypewriter(aiSummary);
 
   // Admins are marked via Supabase app_metadata, which users cannot edit themselves.
   const isAdmin = session?.user?.app_metadata?.role === 'admin';
@@ -124,9 +129,6 @@ export default function App() {
 
       if (error) throw error;
       setSensorData(data || []);
-      // Old anomalies/summaries may no longer apply once fresh data arrives
-      setAiSummary('');
-      setSummaryError('');
     } catch (error) {
       console.error('Error fetching data:', error.message);
     } finally {
@@ -165,6 +167,13 @@ export default function App() {
     const interval = setInterval(fetchData, 60000);
     return () => clearInterval(interval);
   }, [session, startDate, endDate]);
+
+  // A changed date range means different anomalies, so any prior AI summary no longer applies —
+  // but routine auto-refresh polling shouldn't wipe a summary the user just generated.
+  useEffect(() => {
+    setAiSummary('');
+    setSummaryError('');
+  }, [startDate, endDate]);
 
   // Ticks independently of data fetches so "time since last reading" stays accurate between polls
   const [now, setNow] = useState(Date.now());
@@ -429,10 +438,10 @@ export default function App() {
         {dashboard ? (
           <div className="space-y-6">
 
-            {/* Statistically-detected anomalies (z-score, trend, flatline) — no ML involved */}
-            {dashboard.anomalies.length > 0 && (
+            {/* AI summary is optional context on top of the per-sensor anomaly badges below */}
+            {AI_SUMMARY_ENABLED && dashboard.anomalies.length > 0 && (
               <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-amber-200 dark:border-amber-900/60 shadow-sm">
-                <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
+                <div className="flex items-center justify-between gap-4 flex-wrap">
                   <div className="flex items-center gap-2">
                     <AlertTriangle className="w-5 h-5 text-amber-500" />
                     <h3 className="font-semibold text-slate-900 dark:text-slate-100">
@@ -449,30 +458,18 @@ export default function App() {
                   </button>
                 </div>
 
-                <ul className="space-y-2">
-                  {dashboard.anomalies.map((flag, i) => (
-                    <li key={i} className="flex items-start gap-2 text-sm text-slate-700 dark:text-slate-300">
-                      {flag.type === 'trend' ? (
-                        flag.message.includes(' up ') ? (
-                          <TrendingUp className="w-4 h-4 mt-0.5 text-red-500 shrink-0" />
-                        ) : (
-                          <TrendingDown className="w-4 h-4 mt-0.5 text-blue-500 shrink-0" />
-                        )
-                      ) : (
-                        <AlertTriangle className={`w-4 h-4 mt-0.5 shrink-0 ${flag.severity === 'high' ? 'text-red-500' : 'text-amber-500'}`} />
-                      )}
-                      <span>{flag.message}</span>
-                    </li>
-                  ))}
-                </ul>
-
                 {summaryError && (
                   <p className="mt-4 text-sm text-red-600 dark:text-red-400">{summaryError}</p>
                 )}
                 {aiSummary && (
-                  <div className="mt-4 p-4 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-sm text-slate-700 dark:text-slate-300 flex gap-2">
-                    <Sparkles className="w-4 h-4 mt-0.5 text-amber-500 shrink-0" />
-                    <p>{aiSummary}</p>
+                  <div className="mt-4 p-4 rounded-xl bg-indigo-50 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900 text-sm text-slate-700 dark:text-slate-300 flex gap-2">
+                    <Sparkles className="w-4 h-4 mt-0.5 text-indigo-500 shrink-0" />
+                    <p>
+                      {typedSummary}
+                      {typedSummary.length < aiSummary.length && (
+                        <span className="animate-pulse">▍</span>
+                      )}
+                    </p>
                   </div>
                 )}
               </div>
@@ -482,6 +479,7 @@ export default function App() {
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-6">
               {dashboard.perSensor.map((sensor) => {
                 const isStale = stalenessBySensor[sensor.sensorIndex]?.isStale;
+                const sensorAnomalies = dashboard.anomalies.filter((f) => f.sensorIndex === sensor.sensorIndex);
                 return (
                   <div
                     key={sensor.sensorIndex}
@@ -496,13 +494,24 @@ export default function App() {
                         <Thermometer className={`w-5 h-5 ${getStatusColor(sensor.latestTempF)}`} />
                         <span className="font-semibold text-slate-900 dark:text-slate-100">Sensor {sensor.sensorIndex}</span>
                       </div>
-                      <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium backdrop-blur-sm ${
-                        isStale
-                          ? 'bg-red-50/80 border-red-200 text-red-600 dark:bg-red-950/50 dark:border-red-900 dark:text-red-400'
-                          : 'bg-white/60 border-slate-200/50 text-slate-600 dark:bg-slate-800/60 dark:border-slate-700/50 dark:text-slate-300'
-                      }`}>
-                        <span className={`w-2 h-2 rounded-full ${isStale ? 'bg-red-500' : 'bg-emerald-500 animate-pulse'}`}></span>
-                        {isStale ? 'STALE' : 'LIVE'}
+                      <div className="flex items-center gap-2">
+                        {sensorAnomalies.length > 0 && (
+                          <div
+                            className="flex items-center gap-1 px-2 py-1 rounded-full border text-xs font-medium bg-amber-50/80 border-amber-200 text-amber-700 dark:bg-amber-950/50 dark:border-amber-900 dark:text-amber-400"
+                            title={`${sensorAnomalies.length} anomal${sensorAnomalies.length === 1 ? 'y' : 'ies'} detected`}
+                          >
+                            <AlertTriangle className="w-3.5 h-3.5" />
+                            {sensorAnomalies.length}
+                          </div>
+                        )}
+                        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium backdrop-blur-sm ${
+                          isStale
+                            ? 'bg-red-50/80 border-red-200 text-red-600 dark:bg-red-950/50 dark:border-red-900 dark:text-red-400'
+                            : 'bg-white/60 border-slate-200/50 text-slate-600 dark:bg-slate-800/60 dark:border-slate-700/50 dark:text-slate-300'
+                        }`}>
+                          <span className={`w-2 h-2 rounded-full ${isStale ? 'bg-red-500' : 'bg-emerald-500 animate-pulse'}`}></span>
+                          {isStale ? 'STALE' : 'LIVE'}
+                        </div>
                       </div>
                     </div>
 
@@ -532,6 +541,25 @@ export default function App() {
                         <div className="font-mono text-sm font-medium text-slate-900 dark:text-slate-100">{sensor.max.toFixed(1)}°</div>
                       </div>
                     </div>
+
+                    {sensorAnomalies.length > 0 && (
+                      <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800 space-y-1.5">
+                        {sensorAnomalies.map((flag, i) => (
+                          <div key={i} className="flex items-start gap-1.5 text-xs text-slate-600 dark:text-slate-400">
+                            {flag.type.startsWith('trend') ? (
+                              flag.message.includes(' up ') ? (
+                                <TrendingUp className="w-3.5 h-3.5 mt-0.5 text-red-500 shrink-0" />
+                              ) : (
+                                <TrendingDown className="w-3.5 h-3.5 mt-0.5 text-blue-500 shrink-0" />
+                              )
+                            ) : (
+                              <AlertTriangle className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${flag.severity === 'high' ? 'text-red-500' : 'text-amber-500'}`} />
+                            )}
+                            <span>{flag.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 );
               })}
