@@ -2,8 +2,20 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "hvac-moniter-v5",
   "compatibility_date": "2026-08-19",
+  "main": "worker/index.js",
   "assets": {
     "directory": "./dist",
+    "binding": "ASSETS",
     "not_found_handling": "single-page-application"
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  // Not secret (same values already exposed to the client via VITE_ env vars).
+  // Left blank here since this file is committed — set real values via .dev.vars
+  // locally, and as Worker vars (dashboard or `wrangler deploy`) in production.
+  "vars": {
+    "SUPABASE_URL": "",
+    "SUPABASE_ANON_KEY": ""
   }
 }

@@ -5,12 +5,14 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
 } from 'recharts';
 import { 
-  Thermometer, Server, Activity, Clock, ShieldAlert, LogOut, Settings, Hash, RefreshCcw, Phone, Mail 
+  Thermometer, Server, Activity, Clock, ShieldAlert, LogOut, Settings, Hash, RefreshCcw, Phone, Mail, 
+  TrendingUp, TrendingDown, AlertTriangle, Sparkles 
 } from 'lucide-react';
 import AdminPanel from './AdminPanel';
 import LandingPage from './LandingPage';
 import ThemeToggle from './ThemeToggle';
 import logo from './assets/logo.png';
+import { detectAnomalies } from './anomalyDetection';
 
 const COMPANY_NAME = 'Accurate Air Conditioning';
 const COMPANY_PHONE = '(520) 230-5453';
@@ -74,6 +76,9 @@ export default function App() {
   const [startDate, setStartDate] = useState(() => toDateTimeLocal(new Date(Date.now() - 24 * 60 * 60 * 1000)));
   const [endDate, setEndDate] = useState('');
   const isLive = endDate === '';
+  const [aiSummary, setAiSummary] = useState('');
+  const [isSummarizing, setIsSummarizing] = useState(false);
+  const [summaryError, setSummaryError] = useState('');
 
   // Admins are marked via Supabase app_metadata, which users cannot edit themselves.
   const isAdmin = session?.user?.app_metadata?.role === 'admin';
@@ -119,10 +124,37 @@ export default function App() {
 
       if (error) throw error;
       setSensorData(data || []);
+      // Old anomalies/summaries may no longer apply once fresh data arrives
+      setAiSummary('');
+      setSummaryError('');
     } catch (error) {
       console.error('Error fetching data:', error.message);
     } finally {
       setIsSyncing(false);
+    }
+  };
+
+  const handleSummarizeAnomalies = async () => {
+    if (!dashboard?.anomalies?.length) return;
+    setIsSummarizing(true);
+    setSummaryError('');
+    try {
+      const res = await fetch('/api/anomaly-summary', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ flags: dashboard.anomalies }),
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const data = await res.json();
+      setAiSummary(data.summary || '');
+    } catch (error) {
+      console.error('Error summarizing anomalies:', error.message);
+      setSummaryError('Could not generate an AI summary right now.');
+    } finally {
+      setIsSummarizing(false);
     }
   };
 
@@ -176,7 +208,16 @@ export default function App() {
     }
     const chartData = [...byTimestamp.values()].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 
-    return { uniqueSensors, perSensor, chartData };
+    const anomalies = detectAnomalies(
+      perSensor.map((s) => ({
+        sensorIndex: s.sensorIndex,
+        readingsDesc: sensorData
+          .filter((d) => d.sensor_index === s.sensorIndex)
+          .map((d) => ({ timestamp: d.timestamp, tempF: convertCtoF(d.temperature_c) })),
+      }))
+    );
+
+    return { uniqueSensors, perSensor, chartData, anomalies };
   }, [sensorData]);
 
   // Infers each sensor's own publish interval from the gaps between its recent readings,
@@ -387,6 +428,55 @@ export default function App() {
         {/* Sensor Overview Grid */}
         {dashboard ? (
           <div className="space-y-6">
+
+            {/* Statistically-detected anomalies (z-score, trend, flatline) — no ML involved */}
+            {dashboard.anomalies.length > 0 && (
+              <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-amber-200 dark:border-amber-900/60 shadow-sm">
+                <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-5 h-5 text-amber-500" />
+                    <h3 className="font-semibold text-slate-900 dark:text-slate-100">
+                      {dashboard.anomalies.length} Anomal{dashboard.anomalies.length === 1 ? 'y' : 'ies'} Detected
+                    </h3>
+                  </div>
+                  <button
+                    onClick={handleSummarizeAnomalies}
+                    disabled={isSummarizing}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-900 text-amber-400 dark:bg-amber-500 dark:text-slate-900 hover:opacity-90 transition-opacity disabled:opacity-50"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    {isSummarizing ? 'Summarizing…' : 'Summarize with AI'}
+                  </button>
+                </div>
+
+                <ul className="space-y-2">
+                  {dashboard.anomalies.map((flag, i) => (
+                    <li key={i} className="flex items-start gap-2 text-sm text-slate-700 dark:text-slate-300">
+                      {flag.type === 'trend' ? (
+                        flag.message.includes(' up ') ? (
+                          <TrendingUp className="w-4 h-4 mt-0.5 text-red-500 shrink-0" />
+                        ) : (
+                          <TrendingDown className="w-4 h-4 mt-0.5 text-blue-500 shrink-0" />
+                        )
+                      ) : (
+                        <AlertTriangle className={`w-4 h-4 mt-0.5 shrink-0 ${flag.severity === 'high' ? 'text-red-500' : 'text-amber-500'}`} />
+                      )}
+                      <span>{flag.message}</span>
+                    </li>
+                  ))}
+                </ul>
+
+                {summaryError && (
+                  <p className="mt-4 text-sm text-red-600 dark:text-red-400">{summaryError}</p>
+                )}
+                {aiSummary && (
+                  <div className="mt-4 p-4 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-sm text-slate-700 dark:text-slate-300 flex gap-2">
+                    <Sparkles className="w-4 h-4 mt-0.5 text-amber-500 shrink-0" />
+                    <p>{aiSummary}</p>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* One card per sensor so every reading is visible at a glance */}
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-6">

@@ -13,6 +13,8 @@ A React + Vite dashboard for monitoring live temperature data streamed from ESP3
 - **Historical trend chart** — combined line chart (via Recharts) of every sensor over time.
 - **Auto-refresh** — polls Supabase every 60 seconds when viewing live data, with a manual "force sync" button.
 - **Admin device access panel** — admins can grant or revoke a user's access to a specific sensor.
+- **Anomaly detection** — plain-statistics checks (z-score, trend slope, flatline) flag unusual readings per sensor, client-side, for free.
+- **AI anomaly summaries** — an optional "Summarize with AI" button sends already-detected anomalies to a Cloudflare Worker (Workers AI) to generate a plain-English explanation for technicians.
 
 ## Tech Stack
 
@@ -22,6 +24,7 @@ A React + Vite dashboard for monitoring live temperature data streamed from ESP3
 - [Tailwind CSS](https://tailwindcss.com/) for styling
 - [lucide-react](https://lucide.dev/) for icons
 - [Oxlint](https://oxc.rs/) for linting
+- [Cloudflare Workers](https://developers.cloudflare.com/workers/) + [Workers AI](https://developers.cloudflare.com/workers-ai/) for hosting and the anomaly-summary endpoint
 
 ## Getting Started
 
@@ -38,19 +41,28 @@ A React + Vite dashboard for monitoring live temperature data streamed from ESP3
 ```bash
 npm install
 cp .env.example .env   # then fill in your Supabase project values
+cp .dev.vars.example .dev.vars   # then fill in the same Supabase project values (for the Worker)
 npm run dev
 ```
 
 The app will be available at the local URL printed by Vite (typically `http://localhost:5173`).
 
+The "Summarize with AI" button calls a Cloudflare Worker endpoint (`/api/anomaly-summary`), which Vite proxies to `http://127.0.0.1:8787`. Run it in a second terminal to test that feature locally:
+
+```bash
+npm run dev:worker
+```
+
 ### Other Scripts
 
-| Command           | Description                    |
-| ----------------- | ------------------------------- |
-| `npm run dev`     | Start the Vite dev server        |
-| `npm run build`   | Build for production             |
-| `npm run preview` | Preview the production build     |
-| `npm run lint`    | Run Oxlint                       |
+| Command              | Description                                          |
+| -------------------- | ----------------------------------------------------- |
+| `npm run dev`        | Start the Vite dev server                              |
+| `npm run dev:worker` | Start `wrangler dev` for the `/api/anomaly-summary` Worker |
+| `npm run build`      | Build for production                                   |
+| `npm run preview`    | Preview the production build                           |
+| `npm run lint`       | Run Oxlint                                             |
+| `npm run deploy`     | Build, then deploy the app + Worker to Cloudflare       |
 
 ## Configuration
 
@@ -137,25 +149,38 @@ No frontend changes are required for this — [src/App.jsx](src/App.jsx) already
 
 **Note:** this only covers reads. If your ESP32 devices insert rows into `sensor_data` using the anon key, enabling RLS here will also block those inserts unless you add a matching `insert` policy (or have the devices write via the service role key / a server-side function, which bypasses RLS).
 
+## Anomaly Detection & AI Summaries
+
+[src/anomalyDetection.js](src/anomalyDetection.js) runs three plain-statistics checks on each sensor's readings in the selected date range, entirely client-side and free:
+
+- **Z-score** — the latest reading is an outlier vs. that sensor's own recent mean/stddev.
+- **Trend** — a sustained rise or fall (linear regression slope) over recent readings, e.g. a slowly failing compressor.
+- **Flatline** — an unchanging value for many consecutive readings, e.g. a stuck or disconnected sensor.
+
+When any anomalies are found, the dashboard shows them in an "Anomalies Detected" panel with a **Summarize with AI** button. That button calls the `/api/anomaly-summary` endpoint in [worker/index.js](worker/index.js), which runs on Cloudflare Workers AI (`@cf/meta/llama-3.1-8b-instruct-fast`) to turn the already-detected flags into a plain-English note for a technician — the model never sees raw sensor data and never decides what counts as an anomaly, it only explains flags the statistics already raised. The endpoint verifies the caller's Supabase session token before calling the model, so it can't be used by unauthenticated requests.
+
+To enable it, your Cloudflare account needs [Workers AI](https://developers.cloudflare.com/workers-ai/) access (available on the free tier with usage limits).
+
 ## Deployment
 
-This is a static Vite build, so it can be hosted on any static host. To deploy on [Cloudflare Pages](https://pages.cloudflare.com/) connected to Git:
+This app deploys as a single [Cloudflare Worker](https://developers.cloudflare.com/workers/) that serves the built static assets and the `/api/anomaly-summary` endpoint (see [wrangler.jsonc](wrangler.jsonc)):
 
-| Setting | Value |
-| --- | --- |
-| Root directory | `iot-dashboard` |
-| Build command | `npm run build` |
-| Build output directory | `dist` |
+```bash
+npm run deploy
+```
 
-Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as environment variables in the Pages project settings (Production and Preview), since the build runs server-side and needs them baked into the bundle.
+Before deploying, set the Worker's `SUPABASE_URL` and `SUPABASE_ANON_KEY` vars (same values as `.env`) either directly in `wrangler.jsonc`, or via the Cloudflare dashboard / `wrangler deploy --var` so they aren't hardcoded in the committed config. `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` still need to be set wherever `npm run build` runs, since Vite bakes them into the client bundle at build time.
 
 ## Project Structure
 
 ```
 iot-dashboard/
 ├── public/             # Static assets (favicon, icons)
+├── worker/
+│   └── index.js        # Cloudflare Worker: serves built assets + /api/anomaly-summary (Workers AI)
 ├── src/
 │   ├── App.jsx         # Main dashboard UI, auth, and data-fetching logic
+│   ├── anomalyDetection.js # Plain-statistics anomaly checks (z-score, trend, flatline)
 │   ├── LandingPage.jsx # Public marketing page with a simulated live demo
 │   ├── AdminPanel.jsx  # Admin-only device access management
 │   ├── ThemeToggle.jsx # Light/dark mode toggle button
@@ -163,5 +188,6 @@ iot-dashboard/
 │   ├── index.css       # Tailwind entry point
 │   └── main.jsx        # React entry point
 ├── index.html
+├── wrangler.jsonc
 └── vite.config.js
 ```
