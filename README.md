@@ -4,12 +4,14 @@ A React + Vite dashboard for monitoring live temperature data streamed from ESP3
 
 ## Features
 
-- **Authenticated access** — email/password sign-in via Supabase Auth; the dashboard is hidden until a session exists.
+- **Marketing landing page** — a public page with a simulated live demo dashboard, shown before sign-in.
+- **Authenticated access** — email/password sign-in via Supabase Auth; the real dashboard is hidden until a session exists.
+- **Light/dark theme toggle** — available on every screen, defaults to dark, and persists across visits.
 - **Live temperature readout** — current reading (converted from °C to °F) with a color-coded status (cold/normal/hot).
-- **Multi-sensor support** — switch between individual sensors detected in the incoming data.
-- **Rolling statistics** — max, average, and min temperature over the last 100 readings per sensor.
-- **Historical trend chart** — area chart (via Recharts) of recent readings over time.
-- **Auto-refresh** — polls Supabase every 10 seconds, with a manual "force sync" button.
+- **Multi-sensor support** — every sensor detected in the incoming data is shown on one dashboard.
+- **Rolling statistics** — max, average, and min temperature per sensor over the selected date range.
+- **Historical trend chart** — combined line chart (via Recharts) of every sensor over time.
+- **Auto-refresh** — polls Supabase every 60 seconds when viewing live data, with a manual "force sync" button.
 - **Admin device access panel** — admins can grant or revoke a user's access to a specific sensor.
 
 ## Tech Stack
@@ -135,16 +137,30 @@ No frontend changes are required for this — [src/App.jsx](src/App.jsx) already
 
 **Note:** this only covers reads. If your ESP32 devices insert rows into `sensor_data` using the anon key, enabling RLS here will also block those inserts unless you add a matching `insert` policy (or have the devices write via the service role key / a server-side function, which bypasses RLS).
 
+## Deployment
+
+This is a static Vite build, so it can be hosted on any static host. To deploy on [Cloudflare Pages](https://pages.cloudflare.com/) connected to Git:
+
+| Setting | Value |
+| --- | --- |
+| Root directory | `iot-dashboard` |
+| Build command | `npm run build` |
+| Build output directory | `dist` |
+
+Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` as environment variables in the Pages project settings (Production and Preview), since the build runs server-side and needs them baked into the bundle.
+
 ## Project Structure
 
 ```
 iot-dashboard/
-├── public/           # Static assets (favicon, icons)
+├── public/             # Static assets (favicon, icons)
 ├── src/
-│   ├── App.jsx        # Main dashboard UI, auth, and data-fetching logic
-│   ├── AdminPanel.jsx # Admin-only device access management
+│   ├── App.jsx         # Main dashboard UI, auth, and data-fetching logic
+│   ├── LandingPage.jsx # Public marketing page with a simulated live demo
+│   ├── AdminPanel.jsx  # Admin-only device access management
+│   ├── ThemeToggle.jsx # Light/dark mode toggle button
 │   ├── App.css
-│   ├── index.css      # Tailwind entry point
+│   ├── index.css       # Tailwind entry point
 │   └── main.jsx        # React entry point
 ├── index.html
 └── vite.config.js
