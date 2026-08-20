@@ -8,6 +8,8 @@ import {
   Thermometer, Server, Activity, Clock, ShieldAlert, LogOut, Settings, Hash, RefreshCcw, Phone, Mail 
 } from 'lucide-react';
 import AdminPanel from './AdminPanel';
+import LandingPage from './LandingPage';
+import ThemeToggle from './ThemeToggle';
 import logo from './assets/logo.png';
 
 const COMPANY_NAME = 'Accurate Air Conditioning';
@@ -34,15 +36,15 @@ const formatTime = (isoString) => {
 };
 
 const getStatusColor = (tempF) => {
-  if (tempF > 85) return 'text-red-500';
-  if (tempF < 65) return 'text-blue-500';
-  return 'text-amber-500';
+  if (tempF > 85) return 'text-red-500 dark:text-red-400';
+  if (tempF < 65) return 'text-blue-500 dark:text-blue-400';
+  return 'text-amber-500 dark:text-amber-400';
 };
 
 const getStatusBg = (tempF) => {
-  if (tempF > 85) return 'bg-red-50 border-red-200';
-  if (tempF < 65) return 'bg-blue-50 border-blue-200';
-  return 'bg-amber-50 border-amber-200';
+  if (tempF > 85) return 'bg-red-50 border-red-200 dark:bg-red-950/40 dark:border-red-900';
+  if (tempF < 65) return 'bg-blue-50 border-blue-200 dark:bg-blue-950/40 dark:border-blue-900';
+  return 'bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-900';
 };
 
 // Formats a Date as a local "yyyy-MM-ddTHH:mm" string for <input type="datetime-local">
@@ -64,6 +66,8 @@ function CompanyLogo({ className = 'w-9 h-9' }) {
 export default function App() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [authView, setAuthView] = useState('landing'); // 'landing' | 'login', shown only when signed out
+  const [isDark, setIsDark] = useState(() => localStorage.getItem('theme') !== 'light');
   const [sensorData, setSensorData] = useState([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [view, setView] = useState('dashboard');
@@ -78,6 +82,11 @@ export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', isDark);
+    localStorage.setItem('theme', isDark ? 'dark' : 'light');
+  }, [isDark]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -206,47 +215,71 @@ export default function App() {
   };
 
   if (loading) {
-    return <div className="min-h-screen bg-slate-50 flex items-center justify-center">Loading...</div>;
+    return <div className="min-h-screen bg-slate-50 dark:bg-slate-950 dark:text-slate-100 flex items-center justify-center">Loading...</div>;
   }
 
   if (!session) {
+    if (authView === 'landing') {
+      return (
+        <LandingPage
+          onSignIn={() => setAuthView('login')}
+          companyName={COMPANY_NAME}
+          companyPhone={COMPANY_PHONE}
+          companyPhoneHref={COMPANY_PHONE_HREF}
+          companyEmail={COMPANY_EMAIL}
+          logo={logo}
+          isDark={isDark}
+          onToggleTheme={() => setIsDark((v) => !v)}
+        />
+      );
+    }
+
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-        <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md border border-slate-200">
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex items-center justify-center p-4">
+        <div className="bg-white dark:bg-slate-900 p-8 rounded-2xl shadow-xl w-full max-w-md border border-slate-200 dark:border-slate-800">
+          <div className="flex items-center justify-between mb-4">
+            <button
+              onClick={() => setAuthView('landing')}
+              className="text-sm text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors"
+            >
+              ← Back to home
+            </button>
+            <ThemeToggle isDark={isDark} onToggle={() => setIsDark((v) => !v)} />
+          </div>
           <CompanyLogo className="w-16 h-16 mb-6 mx-auto" />
-          <h1 className="text-2xl font-bold text-center text-slate-900 mb-2">{COMPANY_NAME}</h1>
-          <p className="text-center text-slate-500 mb-8">Sign in to view live HVAC telemetry.</p>
+          <h1 className="text-2xl font-bold text-center text-slate-900 dark:text-slate-100 mb-2">{COMPANY_NAME}</h1>
+          <p className="text-center text-slate-500 dark:text-slate-400 mb-8">Sign in to view live HVAC telemetry.</p>
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Email</label>
               <input 
                 type="email" 
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all"
+                className="w-full px-4 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all"
                 required
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Password</label>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Password</label>
               <input 
                 type="password" 
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all"
+                className="w-full px-4 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all"
                 required
               />
             </div>
             {authError && (
-              <div className="p-3 bg-red-50 text-red-700 text-sm rounded-lg flex items-center gap-2">
+              <div className="p-3 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 text-sm rounded-lg flex items-center gap-2">
                 <ShieldAlert className="w-4 h-4" />
                 {authError}
               </div>
             )}
             <button 
               type="submit" 
-              className="w-full bg-slate-900 text-white font-semibold py-2.5 rounded-lg hover:bg-slate-800 transition-colors"
+              className="w-full bg-slate-900 text-white font-semibold py-2.5 rounded-lg hover:bg-slate-800 dark:bg-amber-500 dark:text-slate-900 dark:hover:bg-amber-400 transition-colors"
             >
               Sign In
             </button>
@@ -257,20 +290,20 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-800 selection:bg-amber-500 selection:text-white">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 font-sans text-slate-800 dark:text-slate-200 selection:bg-amber-500 selection:text-white">
       {/* Top Navigation */}
-      <nav className="bg-white border-b border-slate-200 sticky top-0 z-50">
+      <nav className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-24 flex items-center justify-between">
           <div className="flex items-center gap-4">
             <CompanyLogo className="w-16 h-16" />
             <div className="leading-tight">
-              <span className="font-bold text-2xl text-slate-900 tracking-tight block">{COMPANY_NAME}</span>
-              <span className="text-sm text-slate-500">HVAC Telemetry Dashboard</span>
+              <span className="font-bold text-2xl text-slate-900 dark:text-slate-100 tracking-tight block">{COMPANY_NAME}</span>
+              <span className="text-sm text-slate-500 dark:text-slate-400">HVAC Telemetry Dashboard</span>
             </div>
           </div>
           
           <div className="flex items-center gap-4">
-            <div className="hidden sm:flex items-center gap-2 text-sm text-slate-500 bg-slate-100 px-3 py-1.5 rounded-full">
+            <div className="hidden sm:flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-3 py-1.5 rounded-full">
               <Server className="w-4 h-4" />
               Supabase Connected
             </div>
@@ -279,17 +312,18 @@ export default function App() {
                 onClick={() => setView(view === 'admin' ? 'dashboard' : 'admin')}
                 className={`p-2 rounded-lg transition-colors ${
                   view === 'admin'
-                    ? 'bg-slate-900 text-amber-400'
-                    : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100'
+                    ? 'bg-slate-900 text-amber-400 dark:bg-amber-500 dark:text-slate-900'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800'
                 }`}
                 title="Admin: Device Access"
               >
                 <Settings className="w-5 h-5" />
               </button>
             )}
+            <ThemeToggle isDark={isDark} onToggle={() => setIsDark((v) => !v)} />
             <button 
               onClick={handleLogout}
-              className="p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
+              className="p-2 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
               title="Sign Out"
             >
               <LogOut className="w-5 h-5" />
@@ -308,32 +342,32 @@ export default function App() {
         {/* Controls */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-end gap-4 mb-8">
           <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg shadow-sm px-3 py-1.5">
-              <label className="flex flex-col text-xs text-slate-400">
+            <div className="flex items-center gap-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm px-3 py-1.5">
+              <label className="flex flex-col text-xs text-slate-400 dark:text-slate-500">
                 Start
                 <input
                   type="datetime-local"
                   value={startDate}
                   onChange={(e) => setStartDate(e.target.value)}
-                  className="text-sm font-medium text-slate-700 outline-none bg-transparent"
+                  className="text-sm font-medium text-slate-700 dark:text-slate-200 outline-none bg-transparent"
                 />
               </label>
-              <label className="flex flex-col text-xs text-slate-400">
+              <label className="flex flex-col text-xs text-slate-400 dark:text-slate-500">
                 End
                 <input
                   type="datetime-local"
                   value={endDate}
                   onChange={(e) => setEndDate(e.target.value)}
                   disabled={isLive}
-                  className="text-sm font-medium text-slate-700 outline-none bg-transparent disabled:text-slate-300"
+                  className="text-sm font-medium text-slate-700 dark:text-slate-200 outline-none bg-transparent disabled:text-slate-300 dark:disabled:text-slate-600"
                 />
               </label>
               <button
                 onClick={() => setEndDate(isLive ? toDateTimeLocal(new Date()) : '')}
                 className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
                   isLive
-                    ? 'bg-slate-900 text-amber-400'
-                    : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100'
+                    ? 'bg-slate-900 text-amber-400 dark:bg-amber-500 dark:text-slate-900'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800'
                 }`}
                 title="Toggle live end date"
               >
@@ -342,7 +376,7 @@ export default function App() {
             </div>
             <button 
               onClick={fetchData}
-              className={`p-2 bg-white border border-slate-200 rounded-lg shadow-sm text-slate-600 hover:text-slate-900 transition-all ${isSyncing ? 'animate-spin' : ''}`}
+              className={`p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-all ${isSyncing ? 'animate-spin' : ''}`}
               title="Force Sync"
             >
               <RefreshCcw className="w-5 h-5" />
@@ -370,12 +404,12 @@ export default function App() {
                           style={{ backgroundColor: sensorColor(sensor.sensorIndex) }}
                         />
                         <Thermometer className={`w-5 h-5 ${getStatusColor(sensor.latestTempF)}`} />
-                        <span className="font-semibold text-slate-900">Sensor {sensor.sensorIndex}</span>
+                        <span className="font-semibold text-slate-900 dark:text-slate-100">Sensor {sensor.sensorIndex}</span>
                       </div>
                       <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium backdrop-blur-sm ${
                         isStale
-                          ? 'bg-red-50/80 border-red-200 text-red-600'
-                          : 'bg-white/60 border-slate-200/50 text-slate-600'
+                          ? 'bg-red-50/80 border-red-200 text-red-600 dark:bg-red-950/50 dark:border-red-900 dark:text-red-400'
+                          : 'bg-white/60 border-slate-200/50 text-slate-600 dark:bg-slate-800/60 dark:border-slate-700/50 dark:text-slate-300'
                       }`}>
                         <span className={`w-2 h-2 rounded-full ${isStale ? 'bg-red-500' : 'bg-emerald-500 animate-pulse'}`}></span>
                         {isStale ? 'STALE' : 'LIVE'}
@@ -386,26 +420,26 @@ export default function App() {
                       <span className={`text-5xl font-extrabold tracking-tighter ${getStatusColor(sensor.latestTempF)}`}>
                         {sensor.latestTempF.toFixed(1)}°
                       </span>
-                      <span className="text-xl font-bold text-slate-400">F</span>
+                      <span className="text-xl font-bold text-slate-400 dark:text-slate-500">F</span>
                     </div>
 
-                    <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                    <div className="mt-3 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                       <Clock className="w-3.5 h-3.5" />
                       Last updated: {formatTime(sensor.latest.timestamp)}
                     </div>
 
-                    <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-3 gap-2 text-center">
+                    <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800 grid grid-cols-3 gap-2 text-center">
                       <div>
-                        <div className="text-[11px] text-slate-400">Min</div>
-                        <div className="font-mono text-sm font-medium text-slate-900">{sensor.min.toFixed(1)}°</div>
+                        <div className="text-[11px] text-slate-400 dark:text-slate-500">Min</div>
+                        <div className="font-mono text-sm font-medium text-slate-900 dark:text-slate-100">{sensor.min.toFixed(1)}°</div>
                       </div>
                       <div>
-                        <div className="text-[11px] text-slate-400">Avg</div>
-                        <div className="font-mono text-sm font-medium text-slate-900">{sensor.avg.toFixed(1)}°</div>
+                        <div className="text-[11px] text-slate-400 dark:text-slate-500">Avg</div>
+                        <div className="font-mono text-sm font-medium text-slate-900 dark:text-slate-100">{sensor.avg.toFixed(1)}°</div>
                       </div>
                       <div>
-                        <div className="text-[11px] text-slate-400">Max</div>
-                        <div className="font-mono text-sm font-medium text-slate-900">{sensor.max.toFixed(1)}°</div>
+                        <div className="text-[11px] text-slate-400 dark:text-slate-500">Max</div>
+                        <div className="font-mono text-sm font-medium text-slate-900 dark:text-slate-100">{sensor.max.toFixed(1)}°</div>
                       </div>
                     </div>
                   </div>
@@ -414,10 +448,10 @@ export default function App() {
             </div>
 
             {/* Combined Chart Section */}
-            <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
+            <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm">
               <div className="flex items-center justify-between mb-6">
-                <h3 className="font-semibold text-slate-900">Historical Trend — All Sensors</h3>
-                <div className="flex items-center gap-2 text-xs text-slate-400">
+                <h3 className="font-semibold text-slate-900 dark:text-slate-100">Historical Trend — All Sensors</h3>
+                <div className="flex items-center gap-2 text-xs text-slate-400 dark:text-slate-500">
                   <span>
                     {new Date(startDate).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                     {' → '}
@@ -429,24 +463,25 @@ export default function App() {
               <div className="h-96 w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={dashboard.chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDark ? '#334155' : '#e2e8f0'} />
                     <XAxis 
                       dataKey="time" 
                       axisLine={false} 
                       tickLine={false} 
-                      tick={{ fill: '#94a3b8', fontSize: 12 }}
+                      tick={{ fill: isDark ? '#64748b' : '#94a3b8', fontSize: 12 }}
                       minTickGap={50}
                     />
                     <YAxis 
                       axisLine={false} 
                       tickLine={false} 
-                      tick={{ fill: '#94a3b8', fontSize: 12 }}
+                      tick={{ fill: isDark ? '#64748b' : '#94a3b8', fontSize: 12 }}
                       domain={['dataMin - 2', 'dataMax + 2']}
                       tickFormatter={(val) => `${val}°`}
                     />
                     <Tooltip 
-                      contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 25px rgba(15, 23, 42, 0.1)' }}
-                      labelStyle={{ color: '#64748b', marginBottom: '4px' }}
+                      contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 25px rgba(15, 23, 42, 0.1)', backgroundColor: isDark ? '#1e293b' : '#ffffff' }}
+                      labelStyle={{ color: isDark ? '#94a3b8' : '#64748b', marginBottom: '4px' }}
+                      itemStyle={{ color: isDark ? '#e2e8f0' : '#1e293b' }}
                     />
                     <Legend
                       formatter={(value) => value.replace('sensor', 'Sensor ')}
@@ -472,12 +507,12 @@ export default function App() {
 
           </div>
         ) : (
-          <div className="bg-white rounded-2xl p-12 border border-slate-200 shadow-sm flex flex-col items-center justify-center text-center">
-            <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
-              <Activity className="w-8 h-8 text-slate-400" />
+          <div className="bg-white dark:bg-slate-900 rounded-2xl p-12 border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col items-center justify-center text-center">
+            <div className="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mb-4">
+              <Activity className="w-8 h-8 text-slate-400 dark:text-slate-500" />
             </div>
-            <h3 className="text-lg font-semibold text-slate-900">Awaiting Telemetry</h3>
-            <p className="text-slate-500 max-w-sm mt-2">
+            <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Awaiting Telemetry</h3>
+            <p className="text-slate-500 dark:text-slate-400 max-w-sm mt-2">
               The system is connected to Supabase but no sensor readings have been received yet.
             </p>
           </div>
@@ -486,15 +521,15 @@ export default function App() {
         )}
       </main>
 
-      <footer className="border-t border-slate-200 bg-white">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-slate-500">
+      <footer className="border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-slate-500 dark:text-slate-400">
           <span>© {new Date().getFullYear()} {COMPANY_NAME}. All rights reserved.</span>
           <div className="flex items-center gap-5">
-            <a href={COMPANY_PHONE_HREF} className="flex items-center gap-1.5 hover:text-slate-900 transition-colors">
+            <a href={COMPANY_PHONE_HREF} className="flex items-center gap-1.5 hover:text-slate-900 dark:hover:text-white transition-colors">
               <Phone className="w-4 h-4" />
               {COMPANY_PHONE}
             </a>
-            <a href={`mailto:${COMPANY_EMAIL}`} className="flex items-center gap-1.5 hover:text-slate-900 transition-colors">
+            <a href={`mailto:${COMPANY_EMAIL}`} className="flex items-center gap-1.5 hover:text-slate-900 dark:hover:text-white transition-colors">
               <Mail className="w-4 h-4" />
               {COMPANY_EMAIL}
             </a>

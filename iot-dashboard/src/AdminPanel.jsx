@@ -94,16 +94,16 @@ export default function AdminPanel({ supabase }) {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-slate-900">Device Access</h1>
-        <p className="text-sm text-slate-500 mt-1">Grant or revoke user access to individual sensors.</p>
+        <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">Device Access</h1>
+        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Grant or revoke user access to individual sensors.</p>
       </div>
 
       {feedback && (
         <div
           className={`flex items-center gap-2 p-3 rounded-lg text-sm ${
             feedback.type === 'success'
-              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-              : 'bg-red-50 text-red-700 border border-red-200'
+              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-900'
+              : 'bg-red-50 text-red-700 border border-red-200 dark:bg-red-950/40 dark:text-red-400 dark:border-red-900'
           }`}
         >
           {feedback.type === 'success' ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <ShieldAlert className="w-4 h-4 shrink-0" />}
@@ -112,36 +112,36 @@ export default function AdminPanel({ supabase }) {
       )}
 
       {/* Grant Form */}
-      <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-        <h3 className="font-semibold text-slate-900 mb-4">Grant Access</h3>
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm">
+        <h3 className="font-semibold text-slate-900 dark:text-slate-100 mb-4">Grant Access</h3>
         <form onSubmit={handleGrant} className="flex flex-col sm:flex-row gap-4 sm:items-end">
           <div className="flex-1">
-            <label className="block text-sm font-medium text-slate-700 mb-1">User ID</label>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">User ID</label>
             <input
               type="text"
               value={targetUserId}
               onChange={(e) => setTargetUserId(e.target.value)}
               placeholder="e.g. 3f1b2c4d-..."
-              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all font-mono text-sm"
+              className="w-full px-4 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all font-mono text-sm"
               required
             />
           </div>
           <div className="sm:w-40">
-            <label className="block text-sm font-medium text-slate-700 mb-1">Sensor Index</label>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Sensor Index</label>
             <input
               type="number"
               min="0"
               value={sensorIndex}
               onChange={(e) => setSensorIndex(e.target.value)}
               placeholder="0"
-              className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all"
+              className="w-full px-4 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all"
               required
             />
           </div>
           <button
             type="submit"
             disabled={isGranting}
-            className="flex items-center justify-center gap-2 bg-slate-900 text-white font-semibold py-2.5 px-5 rounded-lg hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center justify-center gap-2 bg-slate-900 text-white font-semibold py-2.5 px-5 rounded-lg hover:bg-slate-800 dark:bg-amber-500 dark:text-slate-900 dark:hover:bg-amber-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isGranting ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
             Grant
@@ -150,17 +150,17 @@ export default function AdminPanel({ supabase }) {
       </div>
 
       {/* Existing Permissions */}
-      <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
-        <h3 className="font-semibold text-slate-900 mb-4">Current Permissions</h3>
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm">
+        <h3 className="font-semibold text-slate-900 dark:text-slate-100 mb-4">Current Permissions</h3>
         {isLoadingList ? (
-          <div className="text-sm text-slate-500">Loading...</div>
+          <div className="text-sm text-slate-500 dark:text-slate-400">Loading...</div>
         ) : permissions.length === 0 ? (
-          <div className="text-sm text-slate-500">No permissions have been granted yet.</div>
+          <div className="text-sm text-slate-500 dark:text-slate-400">No permissions have been granted yet.</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-slate-500 border-b border-slate-100">
+                <tr className="text-left text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-800">
                   <th className="pb-2 font-medium">User ID</th>
                   <th className="pb-2 font-medium">Sensor</th>
                   <th className="pb-2 font-medium text-right">Actions</th>
@@ -168,14 +168,14 @@ export default function AdminPanel({ supabase }) {
               </thead>
               <tbody>
                 {permissions.map((permission) => (
-                  <tr key={permission.id} className="border-b border-slate-50 last:border-0">
-                    <td className="py-2.5 font-mono text-slate-700">{permission.user_id}</td>
-                    <td className="py-2.5 text-slate-700">Sensor {permission.sensor_index}</td>
+                  <tr key={permission.id} className="border-b border-slate-50 dark:border-slate-800 last:border-0">
+                    <td className="py-2.5 font-mono text-slate-700 dark:text-slate-300">{permission.user_id}</td>
+                    <td className="py-2.5 text-slate-700 dark:text-slate-300">Sensor {permission.sensor_index}</td>
                     <td className="py-2.5 text-right">
                       <button
                         onClick={() => handleRevoke(permission.id)}
                         disabled={revokingId === permission.id}
-                        className="inline-flex items-center gap-1.5 text-red-600 hover:text-red-800 disabled:opacity-50 transition-colors"
+                        className="inline-flex items-center gap-1.5 text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 disabled:opacity-50 transition-colors"
                         title="Revoke access"
                       >
                         {revokingId === permission.id ? (
