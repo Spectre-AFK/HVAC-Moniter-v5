@@ -26,7 +26,9 @@ DallasTemperature sensors[MAX_SENSORS] = { DallasTemperature(&oneWireBuses[0]), 
 
 // Timers and State Flags
 unsigned long lastMsgTime = 0;
+unsigned long lastHeartbeatTime = 0;
 const long publishInterval = 600000; // Publish every 10 minutes
+const long heartbeatInterval = 30000; // Serial-only "still alive" log while waiting between publishes
 bool shouldSaveConfig = false;
 
 // ---------------------------------------------------------
@@ -145,6 +147,8 @@ void setup() {
       display.display();
     }
   }
+  Serial.print("Display: ");
+  Serial.println(appConfig.has_display ? "Enabled" : "Disabled / not detected");
 
   // 2. Load Config from LittleFS
   loadConfig();
@@ -210,6 +214,12 @@ void loop() {
   mqttClient.loop();
 
   unsigned long now = millis();
+
+  if (now - lastHeartbeatTime > heartbeatInterval) {
+    lastHeartbeatTime = now;
+    Serial.printf("Alive - next publish in %lus\n", (publishInterval - (now - lastMsgTime)) / 1000);
+  }
+
   if (now - lastMsgTime > publishInterval) {
     lastMsgTime = now;
 
@@ -224,6 +234,7 @@ void loop() {
     for (int i = 0; i < appConfig.sensor_count; i++) {
       sensors[i].requestTemperatures(); // each sensor is on its own dedicated 1-Wire pin
       float t = sensors[i].getTempCByIndex(0);
+      Serial.printf("Sensor %d (pin %d): %.2f C\n", i, ONE_WIRE_PINS[i], t);
       if (t == DEVICE_DISCONNECTED_C) {
         tempArray.add(nullptr); // keep array position == sensor_index when a probe drops off the bus
       } else {
