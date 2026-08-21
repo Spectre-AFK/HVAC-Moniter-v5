@@ -3,15 +3,66 @@ import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from 'recharts';
 import {
-  Thermometer, Activity, BellRing, History, Radio, Phone, Mail, ArrowRight
+  Thermometer, Activity, BellRing, Radio, Phone, Mail, ArrowRight, AlertTriangle, Users
 } from 'lucide-react';
 import ThemeToggle from './ThemeToggle';
 
 // Simulated sensors for the marketing demo — no real data, no login required.
-const DEMO_SENSORS = [
-  { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 5, color: '#f59e0b' },
-  { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, color: '#3b82f6' },
-  { id: 2, name: 'Walk-in Cooler', base: 38, amplitude: 3, color: '#10b981' },
+// Each scenario swaps in different sensor readings so visitors can see what the dashboard
+// looks like both on a normal day and when something actually needs attention.
+const SCENARIOS = [
+  {
+    key: 'normal',
+    label: 'A Normal Day',
+    sensors: [
+      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 5, color: '#f59e0b' },
+      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, color: '#3b82f6' },
+      { id: 2, name: 'Walk-in Cooler', base: 38, amplitude: 3, color: '#10b981' },
+    ],
+    alert: null,
+  },
+  {
+    key: 'overheating',
+    label: 'Rooftop Overheating',
+    sensors: [
+      { id: 0, name: 'Rooftop Unit 1', base: 92, amplitude: 3, color: '#f59e0b' },
+      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, color: '#3b82f6' },
+      { id: 2, name: 'Walk-in Cooler', base: 38, amplitude: 3, color: '#10b981' },
+    ],
+    alert: {
+      title: 'Example: 1 Sensor Needs Attention',
+      message: '"Rooftop Unit 1" has climbed above its safe range. You and anyone else watching that sensor ' +
+        'would already have an email about it — and another once it\'s back to normal.',
+    },
+  },
+  {
+    key: 'cooler',
+    label: 'Cooler Door Left Open',
+    sensors: [
+      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 5, color: '#f59e0b' },
+      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, color: '#3b82f6' },
+      { id: 2, name: 'Walk-in Cooler', base: 58, amplitude: 4, color: '#10b981' },
+    ],
+    alert: {
+      title: 'Example: 1 Sensor Needs Attention',
+      message: '"Walk-in Cooler" has been trending warmer over the last hour — often a sign a door was left open. ' +
+        'You\'d get an email the moment it crosses your safe range.',
+    },
+  },
+  {
+    key: 'offline',
+    label: 'Sensor Went Quiet',
+    sensors: [
+      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 5, color: '#f59e0b' },
+      { id: 1, name: 'Server Closet', base: 68, amplitude: 0, jitter: 0, color: '#3b82f6' },
+      { id: 2, name: 'Walk-in Cooler', base: 38, amplitude: 3, color: '#10b981' },
+    ],
+    alert: {
+      title: 'Example: 1 Sensor Needs Attention',
+      message: '"Server Closet" has reported the exact same reading for a while now — usually a sign the sensor ' +
+        'itself has stopped working, not that the room stopped changing temperature.',
+    },
+  },
 ];
 
 const HISTORY_LENGTH = 20;
@@ -31,18 +82,18 @@ const getStatusBg = (tempF) => {
 const FEATURES = [
   {
     icon: Activity,
-    title: 'Real-Time Monitoring',
-    description: 'Track temperature across every sensor and unit as readings stream in, updated live in your browser.',
+    title: 'Live & Historical Data',
+    description: 'Track every sensor as readings stream in live, then pick any date range to review past performance and spot recurring issues.',
   },
   {
     icon: BellRing,
-    title: 'Instant Stale-Sensor Alerts',
-    description: 'Automatically flags any device that stops reporting on schedule, so a dead sensor never goes unnoticed.',
+    title: 'Smart Alerts',
+    description: 'Automatically watches for unusual swings, slow drifts, or sensors that stop reporting, then emails you the moment something needs attention — and again once it\'s resolved.',
   },
   {
-    icon: History,
-    title: 'Historical Trends',
-    description: 'Pick any date range to review past performance, spot patterns, and diagnose recurring issues.',
+    icon: Users,
+    title: 'Built For Your Team',
+    description: 'Rename sensors to match how your team already talks about them, and choose exactly who can see which ones.',
   },
 ];
 
@@ -73,6 +124,9 @@ function DemoSensorCard({ sensor, value }) {
 export default function LandingPage({ onSignIn, companyName, companyPhone, companyPhoneHref, companyEmail, logo, isDark, onToggleTheme }) {
   const [tick, setTick] = useState(0);
   const [history, setHistory] = useState([]);
+  const [scenarioKey, setScenarioKey] = useState(SCENARIOS[0].key);
+  const scenario = SCENARIOS.find((s) => s.key === scenarioKey) ?? SCENARIOS[0];
+  const demoSensors = scenario.sensors;
 
   // Advances the simulated waveform so the demo dashboard visibly "breathes" like a live feed
   useEffect(() => {
@@ -80,19 +134,25 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
     return () => clearInterval(interval);
   }, []);
 
+  // Starts each scenario's chart fresh instead of jumping mid-line from the previous one
+  useEffect(() => {
+    setHistory([]);
+  }, [scenarioKey]);
+
   const liveValues = useMemo(() => {
     const values = {};
-    for (const sensor of DEMO_SENSORS) {
+    for (const sensor of demoSensors) {
       const wave = Math.sin((tick + sensor.id * 3) / 4) * sensor.amplitude;
-      const jitter = (Math.random() - 0.5) * 0.6;
+      const jitter = (Math.random() - 0.5) * (sensor.jitter ?? 0.6);
       values[sensor.id] = sensor.base + wave + jitter;
     }
     return values;
-  }, [tick]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick, scenarioKey]);
 
   useEffect(() => {
     const point = { time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
-    for (const sensor of DEMO_SENSORS) {
+    for (const sensor of demoSensors) {
       point[`sensor${sensor.id}`] = Number(liveValues[sensor.id]?.toFixed(1));
     }
     setHistory((prev) => [...prev, point].slice(-HISTORY_LENGTH));
@@ -180,11 +240,26 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
             This preview updates every few seconds with simulated readings so you can see exactly what your team
             will get after signing in.
           </p>
+          <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+            {SCENARIOS.map((s) => (
+              <button
+                key={s.key}
+                onClick={() => setScenarioKey(s.key)}
+                className={`px-3.5 py-1.5 rounded-full text-sm font-medium border transition-colors ${
+                  s.key === scenarioKey
+                    ? 'bg-slate-900 text-white border-slate-900 dark:bg-amber-500 dark:text-slate-900 dark:border-amber-500'
+                    : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="space-y-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {DEMO_SENSORS.map((sensor) => (
+            {demoSensors.map((sensor) => (
               <DemoSensorCard key={sensor.id} sensor={sensor} value={liveValues[sensor.id] ?? sensor.base} />
             ))}
           </div>
@@ -195,7 +270,7 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={history} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                   <defs>
-                    {DEMO_SENSORS.map((sensor) => (
+                    {demoSensors.map((sensor) => (
                       <linearGradient key={sensor.id} id={`demo-gradient-${sensor.id}`} x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%" stopColor={sensor.color} stopOpacity={0.3} />
                         <stop offset="95%" stopColor={sensor.color} stopOpacity={0} />
@@ -210,7 +285,7 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
                     labelStyle={{ color: isDark ? '#94a3b8' : '#64748b', marginBottom: '4px' }}
                     itemStyle={{ color: isDark ? '#e2e8f0' : '#1e293b' }}
                   />
-                  {DEMO_SENSORS.map((sensor) => (
+                  {demoSensors.map((sensor) => (
                     <Area
                       key={sensor.id}
                       type="monotone"
@@ -227,6 +302,22 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
                 </AreaChart>
               </ResponsiveContainer>
             </div>
+          </div>
+
+          {/* Illustrates how anomaly detection + email alerts look together, in plain language */}
+          <div className={`rounded-2xl p-6 border shadow-sm ${scenario.alert ? 'bg-white dark:bg-slate-900 border-amber-200 dark:border-amber-900/60' : 'bg-white dark:bg-slate-900 border-emerald-200 dark:border-emerald-900/60'}`}>
+            <div className="flex items-center gap-2">
+              <AlertTriangle className={`w-5 h-5 ${scenario.alert ? 'text-amber-500' : 'text-emerald-500'}`} />
+              <h3 className="font-semibold text-slate-900 dark:text-slate-100">
+                {scenario.alert ? scenario.alert.title : 'Example: All Sensors Normal'}
+              </h3>
+            </div>
+            <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+              {scenario.alert
+                ? scenario.alert.message
+                : 'Every sensor is reading within its safe range, so there\'s nothing to do here — that\'s the goal. ' +
+                  'Try one of the other examples above to see what it looks like when something needs attention.'}
+            </p>
           </div>
         </div>
       </section>
