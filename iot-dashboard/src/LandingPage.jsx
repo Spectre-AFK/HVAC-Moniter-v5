@@ -191,7 +191,7 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
           Live HVAC Telemetry, Anywhere
         </div>
         <h1 className="text-4xl sm:text-5xl font-extrabold text-slate-900 dark:text-slate-100 tracking-tight max-w-3xl mx-auto">
-          Know the temperature of every unit, before it becomes a problem.
+          Know the problem, before it becomes a problem.
         </h1>
         <p className="mt-6 text-lg text-slate-500 dark:text-slate-400 max-w-2xl mx-auto">
           {companyName}'s HVAC monitoring dashboard streams live sensor data from rooftop units, server rooms, and
