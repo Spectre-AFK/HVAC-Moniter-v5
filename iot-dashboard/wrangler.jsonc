@@ -11,11 +11,16 @@
   "ai": {
     "binding": "AI"
   },
+  // Runs the sensor alert check (worker/index.js `scheduled` handler) every 5 minutes.
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   // Not secret (same values already exposed to the client via VITE_ env vars).
   // Left blank here since this file is committed — set real values via .dev.vars
   // locally, and as Worker vars (dashboard or `wrangler deploy`) in production.
   "vars": {
     "SUPABASE_URL": "",
-    "SUPABASE_ANON_KEY": ""
+    "SUPABASE_ANON_KEY": "",
+    "ALERT_FROM_EMAIL": ""
   }
 }

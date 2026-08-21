@@ -15,6 +15,7 @@ A React + Vite dashboard for monitoring live temperature data streamed from ESP3
 - **Admin device access panel** — admins can grant or revoke a user's access to a specific sensor.
 - **Anomaly detection** — plain-statistics checks (z-score, trend slope, flatline) flag unusual readings per sensor, client-side, for free.
 - **AI anomaly summaries** — an optional "Summarize with AI" button sends already-detected anomalies to a Cloudflare Worker (Workers AI) to generate a plain-English explanation for technicians.
+- **Sensor alerts** — any signed-in user can set a high/low °F threshold per sensor; a Cloudflare Worker Cron Trigger checks readings every 5 minutes and emails them when a threshold is crossed (and again when it clears).
 
 ## Tech Stack
 
@@ -33,8 +34,9 @@ A React + Vite dashboard for monitoring live temperature data streamed from ESP3
 - Node.js (LTS recommended)
 - A Supabase project with:
   - Auth enabled (email/password)
-  - A `sensor_data` table with at least: `sensor_index`, `temperature_c`, `timestamp`
-  - A `device_permissions` table with at least: `id`, `user_id` (uuid), `sensor_index` (int)
+  - A `sensor_data` table with at least: `device_id`, `sensor_index`, `temperature_c`, `timestamp`
+  - A `device_permissions` table with at least: `id`, `user_id` (uuid), `device_id` (text), `sensor_index` (int)
+  - A `sensor_names` table with: `device_id` (text), `sensor_index` (int), `name` (text) — see "Naming Sensors" below
 
 ### Install & Run
 
@@ -77,7 +79,15 @@ Copy `.env.example` to `.env` and fill in your project's values. `.env` is git-i
 
 ## Admin Access
 
-The admin panel ([src/AdminPanel.jsx](src/AdminPanel.jsx)) lets an admin grant or revoke a user's access to a sensor by inserting/deleting rows in `device_permissions`. It's shown in the nav (gear icon) only when the signed-in user's session has `app_metadata.role === 'admin'`.
+The admin panel ([src/AdminPanel.jsx](src/AdminPanel.jsx)) lets an admin grant or revoke a user's access to a specific sensor on a specific device by inserting/deleting rows in `device_permissions`. `sensor_index` alone isn't unique — every ESP32 numbers its own sensors starting at 0 — so grants are keyed by `device_id` + `sensor_index` together. It's shown in the nav (gear icon) only when the signed-in user's session has `app_metadata.role === 'admin'`.
+
+If you created `device_permissions` before this `device_id` column existed, add it with:
+
+```sql
+alter table public.device_permissions add column if not exists device_id text;
+```
+
+Existing rows will have `device_id = null` and won't match any sensor under the composite policy below until you backfill them (e.g. `update public.device_permissions set device_id = '...' where id = ...`).
 
 To make a user an admin, set their `app_metadata` from the Supabase dashboard or via the admin API (service role key required) — this field cannot be edited by the user themselves:
 
@@ -139,7 +149,8 @@ using (
   or exists (
     select 1
     from public.device_permissions dp
-    where dp.sensor_index = sensor_data.sensor_index
+    where dp.device_id = sensor_data.device_id
+      and dp.sensor_index = sensor_data.sensor_index
       and dp.user_id = auth.uid()
   )
 );
@@ -148,6 +159,49 @@ using (
 No frontend changes are required for this — [src/App.jsx](src/App.jsx) already derives its sensor selector and "awaiting telemetry" state from whatever rows Supabase returns, so it naturally reflects whatever the RLS policy allows.
 
 **Note:** this only covers reads. If your ESP32 devices insert rows into `sensor_data` using the anon key, enabling RLS here will also block those inserts unless you add a matching `insert` policy (or have the devices write via the service role key / a server-side function, which bypasses RLS).
+
+## Naming Sensors
+
+Each sensor card shows a single friendly label (falling back to `Sensor N · Device <last 4 hex chars of device_id>`). Admins can rename a sensor by hovering the label and clicking the pencil icon that appears; the name is stored in `sensor_names`, keyed by `device_id` + `sensor_index` together (not just `device_id`, since one board can have several probes), and applies everywhere that sensor appears (card, chart legend, anomaly messages).
+
+Create the table and lock it down with RLS (any signed-in user can read the names; only admins can add or rename one):
+
+```sql
+create table if not exists public.sensor_names (
+  device_id text not null,
+  sensor_index int not null,
+  name text not null,
+  updated_at timestamptz not null default now(),
+  primary key (device_id, sensor_index)
+);
+
+alter table public.sensor_names enable row level security;
+
+create policy "sensor_names_select"
+on public.sensor_names
+for select
+to authenticated
+using (true);
+
+create policy "sensor_names_insert"
+on public.sensor_names
+for insert
+to authenticated
+with check (
+  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
+);
+
+create policy "sensor_names_update"
+on public.sensor_names
+for update
+to authenticated
+using (
+  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
+)
+with check (
+  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
+);
+```
 
 ## Anomaly Detection & AI Summaries
 
@@ -160,6 +214,47 @@ No frontend changes are required for this — [src/App.jsx](src/App.jsx) already
 When any anomalies are found, the dashboard shows them in an "Anomalies Detected" panel with a **Summarize with AI** button. That button calls the `/api/anomaly-summary` endpoint in [worker/index.js](worker/index.js), which runs on Cloudflare Workers AI (`@cf/meta/llama-3.1-8b-instruct-fast`) to turn the already-detected flags into a plain-English note for a technician — the model never sees raw sensor data and never decides what counts as an anomaly, it only explains flags the statistics already raised. The endpoint verifies the caller's Supabase session token before calling the model, so it can't be used by unauthenticated requests.
 
 To enable it, your Cloudflare account needs [Workers AI](https://developers.cloudflare.com/workers-ai/) access (available on the free tier with usage limits).
+
+## Sensor Alerts
+
+Any signed-in user can open the bell icon in the nav to set a high and/or low °F threshold per sensor they can see (via [src/AlertSettings.jsx](src/AlertSettings.jsx)). A Cloudflare Worker Cron Trigger ([worker/index.js](worker/index.js) `scheduled` handler) runs every 5 minutes, compares each enabled rule against that sensor's latest reading, and emails the rule's owner once when a threshold is crossed and once more when the reading returns to normal — it won't re-email on every check while still breached.
+
+Create the table and lock it down with RLS (each user can only see/manage their own rules):
+
+```sql
+create table if not exists public.alert_rules (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  device_id text not null,
+  sensor_index int not null,
+  high_f numeric,
+  low_f numeric,
+  enabled boolean not null default true,
+  is_triggered boolean not null default false,
+  last_notified_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique (user_id, device_id, sensor_index),
+  constraint alert_rules_threshold_required check (high_f is not null or low_f is not null)
+);
+
+alter table public.alert_rules enable row level security;
+
+create policy "alert_rules_select" on public.alert_rules for select to authenticated using (user_id = auth.uid());
+create policy "alert_rules_insert" on public.alert_rules for insert to authenticated with check (user_id = auth.uid());
+create policy "alert_rules_update" on public.alert_rules for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+create policy "alert_rules_delete" on public.alert_rules for delete to authenticated using (user_id = auth.uid());
+```
+
+The Cron Trigger runs with elevated access (it needs to read every user's rules and look up their email), so it authenticates to Supabase with the **service role key** instead of the anon key — never expose this key to the client. Set these as Worker secrets (see [.dev.vars.example](.dev.vars.example) for local dev):
+
+```bash
+wrangler secret put SUPABASE_SERVICE_ROLE_KEY   # Supabase dashboard: Project Settings > API > service_role key
+wrangler secret put RESEND_API_KEY              # from https://resend.com — or swap sendAlertEmail() in worker/index.js for another provider
+```
+
+And set the non-secret `ALERT_FROM_EMAIL` (the "from" address for alert emails) alongside the other Worker vars in [wrangler.jsonc](wrangler.jsonc) or the Cloudflare dashboard.
+
+**Note:** Cron Triggers only run on the deployed Worker, not `wrangler dev` — to test the alert check locally, temporarily call `checkAlertRules(env)` from an HTTP route, or use `wrangler dev --test-scheduled` and hit `/__scheduled`.
 
 ## Deployment
 

@@ -6,9 +6,10 @@ import {
 } from 'recharts';
 import { 
   Thermometer, Server, Activity, Clock, ShieldAlert, LogOut, Settings, Hash, RefreshCcw, Phone, Mail, 
-  TrendingUp, TrendingDown, AlertTriangle, Sparkles 
+  TrendingUp, TrendingDown, AlertTriangle, Sparkles, Pencil, BellRing 
 } from 'lucide-react';
 import AdminPanel from './AdminPanel';
+import AlertSettings from './AlertSettings';
 import LandingPage from './LandingPage';
 import ThemeToggle from './ThemeToggle';
 import logo from './assets/logo.png';
@@ -59,10 +60,15 @@ const toDateTimeLocal = (date) => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
-// One distinct color per sensor_index (matches MAX_SENSORS on the ESP32) so the combined
+// One distinct color per physical sensor (device_id + sensor_index) so the combined
 // chart and per-sensor cards stay visually consistent with each other.
 const SENSOR_COLORS = ['#f59e0b', '#3b82f6', '#10b981', '#a855f7', '#ef4444'];
 const sensorColor = (idx) => SENSOR_COLORS[idx % SENSOR_COLORS.length];
+
+// sensor_index alone isn't unique across devices (each ESP32 numbers its own sensors from 0),
+// so every physical sensor must be identified by device_id + sensor_index together.
+const sensorKey = (d) => `${d.device_id}_${d.sensor_index}`;
+const shortDeviceId = (deviceId) => (deviceId ? deviceId.slice(-4).toUpperCase() : '????');
 
 function CompanyLogo({ className = 'w-9 h-9' }) {
   return <img src={logo} alt={`${COMPANY_NAME} logo`} className={`${className} object-contain shrink-0`} />;
@@ -87,6 +93,15 @@ export default function App() {
 
   // Admins are marked via Supabase app_metadata, which users cannot edit themselves.
   const isAdmin = session?.user?.app_metadata?.role === 'admin';
+
+  // Friendly name for each physical sensor (device_id + sensor_index), editable by admins only.
+  // Only the "Sensor N" part is editable — the device suffix stays fixed for identification.
+  const [sensorNames, setSensorNames] = useState({});
+  const [editingSensorKey, setEditingSensorKey] = useState(null);
+  const [editingName, setEditingName] = useState('');
+  const sensorNameLabel = (key, sensorIndex) => sensorNames[key]?.trim() || `Sensor ${sensorIndex}`;
+  const sensorLabel = (key, deviceId, sensorIndex) =>
+    `${sensorNameLabel(key, sensorIndex)} · Device ${shortDeviceId(deviceId)}`;
 
   // Authentication Setup
   const [email, setEmail] = useState('');
@@ -160,6 +175,32 @@ export default function App() {
     }
   };
 
+  const fetchSensorNames = async () => {
+    const { data, error } = await supabase.from('sensor_names').select('*');
+    if (error) {
+      console.error('Error fetching sensor names:', error.message);
+      return;
+    }
+    const map = {};
+    for (const row of data || []) map[`${row.device_id}_${row.sensor_index}`] = row.name;
+    setSensorNames(map);
+  };
+
+  const saveSensorName = async (key, deviceId, sensorIndex) => {
+    const trimmed = editingName.trim();
+    setEditingSensorKey(null);
+    if (!trimmed || trimmed === sensorNames[key]) return;
+
+    const { error } = await supabase
+      .from('sensor_names')
+      .upsert({ device_id: deviceId, sensor_index: sensorIndex, name: trimmed });
+    if (error) {
+      console.error('Error saving sensor name:', error.message);
+      return;
+    }
+    setSensorNames((prev) => ({ ...prev, [key]: trimmed }));
+  };
+
   useEffect(() => {
     fetchData();
     // Only poll for fresh data when the end of the range is "live" (no fixed end date)
@@ -167,6 +208,11 @@ export default function App() {
     const interval = setInterval(fetchData, 60000);
     return () => clearInterval(interval);
   }, [session, startDate, endDate]);
+
+  useEffect(() => {
+    if (!session) return;
+    fetchSensorNames();
+  }, [session]);
 
   // A changed date range means different anomalies, so any prior AI summary no longer applies —
   // but routine auto-refresh polling shouldn't wipe a summary the user just generated.
@@ -188,11 +234,13 @@ export default function App() {
   const dashboard = useMemo(() => {
     if (!sensorData.length) return null;
 
-    const uniqueSensors = [...new Set(sensorData.map(d => d.sensor_index))].sort((a, b) => a - b);
+    // Composite key, not sensor_index alone: two ESP32s both number their sensors from 0.
+    const uniqueSensorKeys = [...new Set(sensorData.map(sensorKey))].sort();
 
-    const perSensor = uniqueSensors.map((sensorIndex) => {
-      const readings = sensorData.filter(d => d.sensor_index === sensorIndex);
+    const perSensor = uniqueSensorKeys.map((key, colorIndex) => {
+      const readings = sensorData.filter(d => sensorKey(d) === key);
       const latest = readings[0];
+      const { device_id: deviceId, sensor_index: sensorIndex } = latest;
       const latestTempF = convertCtoF(latest.temperature_c);
 
       const temps = readings.map(d => convertCtoF(d.temperature_c));
@@ -203,7 +251,7 @@ export default function App() {
       // Kept for staleness detection: each device may publish at a different rate
       const recentTimestamps = readings.slice(0, 7).map(d => d.timestamp);
 
-      return { sensorIndex, latest, latestTempF, max, min, avg, recentTimestamps };
+      return { key, deviceId, sensorIndex, colorIndex, latest, latestTempF, max, min, avg, recentTimestamps };
     });
 
     // Readings from the same publish event share an identical timestamp, so grouping by
@@ -213,21 +261,22 @@ export default function App() {
       if (!byTimestamp.has(d.timestamp)) {
         byTimestamp.set(d.timestamp, { timestamp: d.timestamp, time: formatTime(d.timestamp) });
       }
-      byTimestamp.get(d.timestamp)[`sensor${d.sensor_index}`] = Number(convertCtoF(d.temperature_c).toFixed(1));
+      byTimestamp.get(d.timestamp)[sensorKey(d)] = Number(convertCtoF(d.temperature_c).toFixed(1));
     }
     const chartData = [...byTimestamp.values()].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 
     const anomalies = detectAnomalies(
       perSensor.map((s) => ({
-        sensorIndex: s.sensorIndex,
+        key: s.key,
+        label: sensorLabel(s.key, s.deviceId, s.sensorIndex),
         readingsDesc: sensorData
-          .filter((d) => d.sensor_index === s.sensorIndex)
+          .filter((d) => sensorKey(d) === s.key)
           .map((d) => ({ timestamp: d.timestamp, tempF: convertCtoF(d.temperature_c) })),
       }))
     );
 
-    return { uniqueSensors, perSensor, chartData, anomalies };
-  }, [sensorData]);
+    return { uniqueSensorKeys, perSensor, chartData, anomalies };
+  }, [sensorData, sensorNames]);
 
   // Infers each sensor's own publish interval from the gaps between its recent readings,
   // rather than assuming a fixed rate shared by every device.
@@ -248,7 +297,7 @@ export default function App() {
       const staleThresholdMs = Math.max((expectedIntervalMs ?? 60000) * 2.5, 60000);
       const msSinceLastReading = now - timestamps[0];
 
-      map[sensor.sensorIndex] = { isStale: msSinceLastReading > staleThresholdMs, msSinceLastReading };
+      map[sensor.key] = { isStale: msSinceLastReading > staleThresholdMs, msSinceLastReading };
     }
     return map;
   }, [dashboard, isLive, now]);
@@ -370,6 +419,17 @@ export default function App() {
                 <Settings className="w-5 h-5" />
               </button>
             )}
+            <button
+              onClick={() => setView(view === 'alerts' ? 'dashboard' : 'alerts')}
+              className={`p-2 rounded-lg transition-colors ${
+                view === 'alerts'
+                  ? 'bg-slate-900 text-amber-400 dark:bg-amber-500 dark:text-slate-900'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+              title="Sensor Alerts"
+            >
+              <BellRing className="w-5 h-5" />
+            </button>
             <ThemeToggle isDark={isDark} onToggle={() => setIsDark((v) => !v)} />
             <button 
               onClick={handleLogout}
@@ -387,6 +447,17 @@ export default function App() {
         
         {view === 'admin' && isAdmin ? (
           <AdminPanel supabase={supabase} />
+        ) : view === 'alerts' ? (
+          <AlertSettings
+            supabase={supabase}
+            userId={session.user.id}
+            sensors={(dashboard?.perSensor ?? []).map((sensor) => ({
+              key: sensor.key,
+              deviceId: sensor.deviceId,
+              sensorIndex: sensor.sensorIndex,
+              label: sensorLabel(sensor.key, sensor.deviceId, sensor.sensorIndex),
+            }))}
+          />
         ) : (
         <>
         {/* Controls */}
@@ -478,21 +549,56 @@ export default function App() {
             {/* One card per sensor so every reading is visible at a glance */}
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-6">
               {dashboard.perSensor.map((sensor) => {
-                const isStale = stalenessBySensor[sensor.sensorIndex]?.isStale;
-                const sensorAnomalies = dashboard.anomalies.filter((f) => f.sensorIndex === sensor.sensorIndex);
+                const isStale = stalenessBySensor[sensor.key]?.isStale;
+                const sensorAnomalies = dashboard.anomalies.filter((f) => f.key === sensor.key);
                 return (
                   <div
-                    key={sensor.sensorIndex}
+                    key={sensor.key}
                     className={`rounded-2xl p-6 border shadow-sm transition-colors duration-500 ${getStatusBg(sensor.latestTempF)}`}
                   >
                     <div className="flex justify-between items-start mb-4">
                       <div className="flex items-center gap-2">
                         <span
                           className="w-2.5 h-2.5 rounded-full shrink-0"
-                          style={{ backgroundColor: sensorColor(sensor.sensorIndex) }}
+                          style={{ backgroundColor: sensorColor(sensor.colorIndex) }}
                         />
                         <Thermometer className={`w-5 h-5 ${getStatusColor(sensor.latestTempF)}`} />
-                        <span className="font-semibold text-slate-900 dark:text-slate-100">Sensor {sensor.sensorIndex}</span>
+                        <span className="font-semibold text-slate-900 dark:text-slate-100 flex items-center">
+                          <span className="group/device inline-flex items-center gap-1">
+                            {editingSensorKey === sensor.key ? (
+                              <input
+                                autoFocus
+                                type="text"
+                                value={editingName}
+                                onChange={(e) => setEditingName(e.target.value)}
+                                onBlur={() => saveSensorName(sensor.key, sensor.deviceId, sensor.sensorIndex)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') e.currentTarget.blur();
+                                  if (e.key === 'Escape') setEditingSensorKey(null);
+                                }}
+                                className="w-28 px-1.5 py-0.5 text-sm font-normal rounded border border-slate-300 dark:border-slate-700 dark:bg-slate-800 text-slate-700 dark:text-slate-200 outline-none focus:ring-1 focus:ring-amber-500"
+                              />
+                            ) : (
+                              <>
+                                {sensorNameLabel(sensor.key, sensor.sensorIndex)}
+                                {isAdmin && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingSensorKey(sensor.key);
+                                      setEditingName(sensorNames[sensor.key] || '');
+                                    }}
+                                    title="Rename sensor"
+                                    className="opacity-0 group-hover/device:opacity-100 transition-opacity text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                                  >
+                                    <Pencil className="w-3 h-3" />
+                                  </button>
+                                )}
+                              </>
+                            )}
+                          </span>
+                          <span className="ml-1.5 font-normal text-xs text-slate-400 dark:text-slate-500">· Device {shortDeviceId(sensor.deviceId)}</span>
+                        </span>
                       </div>
                       <div className="flex items-center gap-2">
                         {sensorAnomalies.length > 0 && (
@@ -601,17 +707,14 @@ export default function App() {
                       labelStyle={{ color: isDark ? '#94a3b8' : '#64748b', marginBottom: '4px' }}
                       itemStyle={{ color: isDark ? '#e2e8f0' : '#1e293b' }}
                     />
-                    <Legend
-                      formatter={(value) => value.replace('sensor', 'Sensor ')}
-                      wrapperStyle={{ fontSize: 12 }}
-                    />
-                    {dashboard.uniqueSensors.map((sensorIndex) => (
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    {dashboard.perSensor.map((sensor) => (
                       <Line
-                        key={sensorIndex}
+                        key={sensor.key}
                         type="monotone"
-                        dataKey={`sensor${sensorIndex}`}
-                        name={`sensor${sensorIndex}`}
-                        stroke={sensorColor(sensorIndex)}
+                        dataKey={sensor.key}
+                        name={sensorLabel(sensor.key, sensor.deviceId, sensor.sensorIndex)}
+                        stroke={sensorColor(sensor.colorIndex)}
                         strokeWidth={2.5}
                         dot={false}
                         connectNulls

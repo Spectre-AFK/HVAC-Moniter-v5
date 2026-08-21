@@ -51,7 +51,7 @@ function formatSpan(hours) {
 
 // Builds a trend flag from up to `maxPoints` of a sensor's most recent readings, or
 // null if there isn't enough history yet or the slope doesn't clear the threshold.
-function trendFlag(sensorIndex, readingsDesc, { type, minPoints, maxPoints, slopeThreshold }) {
+function trendFlag(key, label, readingsDesc, { type, minPoints, maxPoints, slopeThreshold }) {
   if (readingsDesc.length < minPoints) return null;
 
   const windowAsc = readingsDesc.slice(0, Math.min(readingsDesc.length, maxPoints)).slice().reverse();
@@ -61,22 +61,23 @@ function trendFlag(sensorIndex, readingsDesc, { type, minPoints, maxPoints, slop
   const spanHours = (new Date(windowAsc[windowAsc.length - 1].timestamp).getTime() - new Date(windowAsc[0].timestamp).getTime()) / 3_600_000;
 
   return {
-    sensorIndex,
+    key,
     type,
     severity: Math.abs(slope) >= slopeThreshold * 2 ? 'high' : 'medium',
-    message: `Sensor ${sensorIndex} is trending ${slope > 0 ? 'up' : 'down'} at ~${Math.abs(slope).toFixed(2)}°F/hour over its last ${windowAsc.length} readings (${formatSpan(spanHours)}).`,
+    message: `${label} is trending ${slope > 0 ? 'up' : 'down'} at ~${Math.abs(slope).toFixed(2)}°F/hour over its last ${windowAsc.length} readings (${formatSpan(spanHours)}).`,
   };
 }
 
 /**
- * @param {{ sensorIndex: number, readingsDesc: { timestamp: string, tempF: number }[] }[]} perSensor
- *   readingsDesc must be newest-first, matching the Supabase query order.
- * @returns {Array<{ sensorIndex: number, type: 'zscore'|'trend-short'|'trend-long'|'flatline', severity: 'medium'|'high', message: string }>}
+ * @param {{ key: string, label: string, readingsDesc: { timestamp: string, tempF: number }[] }[]} perSensor
+ *   `key` must uniquely identify a physical sensor (e.g. device_id + sensor_index), since sensor_index
+ *   alone can repeat across devices. readingsDesc must be newest-first, matching the Supabase query order.
+ * @returns {Array<{ key: string, type: 'zscore'|'trend-short'|'trend-long'|'flatline', severity: 'medium'|'high', message: string }>}
  */
 export function detectAnomalies(perSensor) {
   const flags = [];
 
-  for (const { sensorIndex, readingsDesc } of perSensor) {
+  for (const { key, label, readingsDesc } of perSensor) {
     if (readingsDesc.length < MIN_READINGS_FOR_STATS) continue;
 
     const temps = readingsDesc.map((r) => r.tempF);
@@ -88,16 +89,16 @@ export function detectAnomalies(perSensor) {
       const z = (latest.tempF - avg) / sd;
       if (Math.abs(z) >= Z_SCORE_THRESHOLD) {
         flags.push({
-          sensorIndex,
+          key,
           type: 'zscore',
           severity: Math.abs(z) >= Z_SCORE_THRESHOLD + 1 ? 'high' : 'medium',
-          message: `Sensor ${sensorIndex}'s latest reading (${latest.tempF.toFixed(1)}°F) is ${Math.abs(z).toFixed(1)}σ from its recent average (${avg.toFixed(1)}°F).`,
+          message: `${label}'s latest reading (${latest.tempF.toFixed(1)}°F) is ${Math.abs(z).toFixed(1)}σ from its recent average (${avg.toFixed(1)}°F).`,
         });
       }
     }
 
     if (readingsDesc.length >= SHORT_TREND_MIN_POINTS) {
-      const shortTrend = trendFlag(sensorIndex, readingsDesc, {
+      const shortTrend = trendFlag(key, label, readingsDesc, {
         type: 'trend-short',
         minPoints: SHORT_TREND_MIN_POINTS,
         maxPoints: SHORT_TREND_MAX_POINTS,
@@ -107,7 +108,7 @@ export function detectAnomalies(perSensor) {
     }
 
     if (readingsDesc.length >= LONG_TREND_MIN_POINTS) {
-      const longTrend = trendFlag(sensorIndex, readingsDesc, {
+      const longTrend = trendFlag(key, label, readingsDesc, {
         type: 'trend-long',
         minPoints: LONG_TREND_MIN_POINTS,
         maxPoints: LONG_TREND_MAX_POINTS,
@@ -122,10 +123,10 @@ export function detectAnomalies(perSensor) {
       const recentSd = stddev(recent, recentAvg);
       if (recentSd <= FLATLINE_STDDEV_THRESHOLD) {
         flags.push({
-          sensorIndex,
+          key,
           type: 'flatline',
           severity: 'medium',
-          message: `Sensor ${sensorIndex} has reported an unchanging value (${recentAvg.toFixed(1)}°F) for its last ${FLATLINE_MIN_POINTS} readings — possible sensor failure.`,
+          message: `${label} has reported an unchanging value (${recentAvg.toFixed(1)}°F) for its last ${FLATLINE_MIN_POINTS} readings — possible sensor failure.`,
         });
       }
     }

@@ -8,6 +8,7 @@ export default function AdminPanel({ supabase }) {
   const [permissions, setPermissions] = useState([]);
   const [isLoadingList, setIsLoadingList] = useState(true);
   const [targetUserId, setTargetUserId] = useState('');
+  const [deviceId, setDeviceId] = useState('');
   const [sensorIndex, setSensorIndex] = useState('');
   const [isGranting, setIsGranting] = useState(false);
   const [revokingId, setRevokingId] = useState(null);
@@ -32,11 +33,12 @@ export default function AdminPanel({ supabase }) {
     fetchPermissions();
   }, [fetchPermissions]);
 
-  // Grant a user access to a specific sensor.
-  const grantDeviceAccess = async (targetUserId, sensorIndex) => {
+  // Grant a user access to a specific sensor on a specific device (sensor_index alone
+  // isn't unique — every ESP32 numbers its own sensors starting at 0).
+  const grantDeviceAccess = async (targetUserId, deviceId, sensorIndex) => {
     const { error } = await supabase
       .from('device_permissions')
-      .insert([{ user_id: targetUserId, sensor_index: sensorIndex }]);
+      .insert([{ user_id: targetUserId, device_id: deviceId, sensor_index: sensorIndex }]);
 
     if (error) {
       console.error('Failed to grant access:', error.message);
@@ -49,10 +51,15 @@ export default function AdminPanel({ supabase }) {
     setFeedback(null);
 
     const trimmedUserId = targetUserId.trim();
+    const trimmedDeviceId = deviceId.trim();
     const parsedSensorIndex = Number(sensorIndex);
 
     if (!trimmedUserId) {
       setFeedback({ type: 'error', text: 'User ID is required.' });
+      return;
+    }
+    if (!trimmedDeviceId) {
+      setFeedback({ type: 'error', text: 'Device ID is required.' });
       return;
     }
     if (sensorIndex === '' || !Number.isInteger(parsedSensorIndex) || parsedSensorIndex < 0) {
@@ -62,9 +69,10 @@ export default function AdminPanel({ supabase }) {
 
     setIsGranting(true);
     try {
-      await grantDeviceAccess(trimmedUserId, parsedSensorIndex);
-      setFeedback({ type: 'success', text: `Access to sensor ${parsedSensorIndex} granted.` });
+      await grantDeviceAccess(trimmedUserId, trimmedDeviceId, parsedSensorIndex);
+      setFeedback({ type: 'success', text: `Access to device ${trimmedDeviceId}, sensor ${parsedSensorIndex} granted.` });
       setTargetUserId('');
+      setDeviceId('');
       setSensorIndex('');
       await fetchPermissions();
     } catch (error) {
@@ -126,6 +134,17 @@ export default function AdminPanel({ supabase }) {
               required
             />
           </div>
+          <div className="flex-1">
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Device ID</label>
+            <input
+              type="text"
+              value={deviceId}
+              onChange={(e) => setDeviceId(e.target.value)}
+              placeholder="e.g. 20E7C8ECE5B4"
+              className="w-full px-4 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all font-mono text-sm"
+              required
+            />
+          </div>
           <div className="sm:w-40">
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Sensor Index</label>
             <input
@@ -162,6 +181,7 @@ export default function AdminPanel({ supabase }) {
               <thead>
                 <tr className="text-left text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-800">
                   <th className="pb-2 font-medium">User ID</th>
+                  <th className="pb-2 font-medium">Device</th>
                   <th className="pb-2 font-medium">Sensor</th>
                   <th className="pb-2 font-medium text-right">Actions</th>
                 </tr>
@@ -170,6 +190,7 @@ export default function AdminPanel({ supabase }) {
                 {permissions.map((permission) => (
                   <tr key={permission.id} className="border-b border-slate-50 dark:border-slate-800 last:border-0">
                     <td className="py-2.5 font-mono text-slate-700 dark:text-slate-300">{permission.user_id}</td>
+                    <td className="py-2.5 font-mono text-slate-700 dark:text-slate-300">{permission.device_id}</td>
                     <td className="py-2.5 text-slate-700 dark:text-slate-300">Sensor {permission.sensor_index}</td>
                     <td className="py-2.5 text-right">
                       <button
