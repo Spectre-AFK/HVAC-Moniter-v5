@@ -2,22 +2,22 @@
 // Intentionally no ML/AI here — just z-score, linear trend, and flatline checks,
 // so results are deterministic and free to compute on every render.
 
-const MIN_READINGS_FOR_STATS = 6;
-const Z_SCORE_THRESHOLD = 3;
+const MIN_READINGS_FOR_STATS = 10;
+const Z_SCORE_THRESHOLD = 3.5;
 
 // Recent, short-window trend — catches a change happening right now.
 const SHORT_TREND_MIN_POINTS = 6;
 const SHORT_TREND_MAX_POINTS = 24;
-const SHORT_TREND_SLOPE_THRESHOLD_F_PER_HOUR = 0.75;
+const SHORT_TREND_SLOPE_THRESHOLD_F_PER_HOUR = 1.5;
 
 // Longer-window trend — catches slow multi-day drift a short window would smooth away.
 // Threshold is much lower per-hour since it only needs to add up over many hours.
 const LONG_TREND_MIN_POINTS = 100;
 const LONG_TREND_MAX_POINTS = 1000;
-const LONG_TREND_SLOPE_THRESHOLD_F_PER_HOUR = 0.08;
+const LONG_TREND_SLOPE_THRESHOLD_F_PER_HOUR = 0.15;
 
-const FLATLINE_MIN_POINTS = 10;
-const FLATLINE_STDDEV_THRESHOLD = 0.05;
+const FLATLINE_MIN_POINTS = 15;
+const FLATLINE_STDDEV_THRESHOLD = 0.02;
 
 function mean(values) {
   return values.reduce((a, b) => a + b, 0) / values.length;
