@@ -16,11 +16,11 @@
     "crons": ["*/5 * * * *"]
   },
   // Not secret (same values already exposed to the client via VITE_ env vars).
-  // Left blank here since this file is committed — set real values via .dev.vars
-  // locally, and as Worker vars (dashboard or `wrangler deploy`) in production.
+  // Real values committed directly — `wrangler deploy` overwrites dashboard-set vars with
+  // whatever is here on every deploy, so leaving these blank silently breaks production.
   "vars": {
-    "SUPABASE_URL": "",
-    "SUPABASE_ANON_KEY": "",
-    "ALERT_FROM_EMAIL": ""
+    "SUPABASE_URL": "https://swbcwtrijguodjaxyitm.supabase.co",
+    "SUPABASE_ANON_KEY": "sb_publishable_iVV7-ht6QWT2cqYg_MxWfg_cdPRWd2Y",
+    "ALERT_FROM_EMAIL": "alerts@checkmytemp.com"
   }
 }

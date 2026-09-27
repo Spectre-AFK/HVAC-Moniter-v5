@@ -9,6 +9,7 @@
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
+    "test": "vitest run",
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
@@ -28,6 +29,7 @@
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
     "vite": "^8.2.0",
+    "vitest": "^4.1.11",
     "wrangler": "^4.28.0"
   }
 }

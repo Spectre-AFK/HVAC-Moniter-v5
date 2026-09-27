@@ -1,18 +1,59 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { UserPlus, Trash2, ShieldAlert, CheckCircle2, Loader2 } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { UserPlus, Trash2, ShieldAlert, CheckCircle2, Loader2, Search, X } from 'lucide-react';
 
 // Admin-only screen for managing which users can view which sensors.
 // Client-side admin gating is UX only — the real enforcement must live in
 // Supabase RLS policies on `device_permissions` (see README "Admin Access").
-export default function AdminPanel({ supabase }) {
+export default function AdminPanel({ supabase, sensors, accessToken }) {
   const [permissions, setPermissions] = useState([]);
+  const [userEmails, setUserEmails] = useState({}); // user_id -> email (resolved via /api/admin/users)
   const [isLoadingList, setIsLoadingList] = useState(true);
-  const [targetUserId, setTargetUserId] = useState('');
-  const [deviceId, setDeviceId] = useState('');
-  const [sensorIndex, setSensorIndex] = useState('');
-  const [isGranting, setIsGranting] = useState(false);
-  const [revokingId, setRevokingId] = useState(null);
   const [feedback, setFeedback] = useState(null); // { type: 'success' | 'error', text: string }
+
+  // Grant form
+  const [selectedSensorKey, setSelectedSensorKey] = useState('');
+  const [userQuery, setUserQuery] = useState('');
+  const [selectedUser, setSelectedUser] = useState(null); // { id, email }
+  const [userResults, setUserResults] = useState([]);
+  const [isSearchingUsers, setIsSearchingUsers] = useState(false);
+  const [isGranting, setIsGranting] = useState(false);
+
+  const [revokingId, setRevokingId] = useState(null);
+
+  const sensorByKey = useMemo(() => new Map(sensors.map((s) => [s.key, s])), [sensors]);
+
+  const labelForPermission = useCallback(
+    (permission) => {
+      const match = sensorByKey.get(`${permission.device_id}_${permission.sensor_index}`);
+      if (match) return match.label;
+      const suffix = permission.device_id ? permission.device_id.slice(-4).toUpperCase() : '????';
+      return `Sensor ${permission.sensor_index} · Device ${suffix}`;
+    },
+    [sensorByKey]
+  );
+
+  const resolveEmails = useCallback(
+    async (userIds) => {
+      const missing = [...new Set(userIds)].filter((id) => !(id in userEmails));
+      if (missing.length === 0) return;
+      try {
+        const res = await fetch(`/api/admin/users?ids=${encodeURIComponent(missing.join(','))}`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!res.ok) throw new Error(`Lookup failed (${res.status})`);
+        const data = await res.json();
+        const found = new Map((data.users || []).map((u) => [u.id, u.email]));
+        setUserEmails((prev) => {
+          const next = { ...prev };
+          for (const id of missing) next[id] = found.get(id) ?? null;
+          return next;
+        });
+      } catch (error) {
+        console.error('Failed to resolve user emails:', error.message);
+      }
+    },
+    [accessToken, userEmails]
+  );
 
   const fetchPermissions = useCallback(async () => {
     setIsLoadingList(true);
@@ -25,55 +66,90 @@ export default function AdminPanel({ supabase }) {
       setFeedback({ type: 'error', text: `Failed to load permissions: ${error.message}` });
     } else {
       setPermissions(data || []);
+      await resolveEmails((data || []).map((p) => p.user_id));
     }
     setIsLoadingList(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase]);
 
   useEffect(() => {
     fetchPermissions();
   }, [fetchPermissions]);
 
-  // Grant a user access to a specific sensor on a specific device (sensor_index alone
-  // isn't unique — every ESP32 numbers its own sensors starting at 0).
-  const grantDeviceAccess = async (targetUserId, deviceId, sensorIndex) => {
-    const { error } = await supabase
-      .from('device_permissions')
-      .insert([{ user_id: targetUserId, device_id: deviceId, sensor_index: sensorIndex }]);
-
-    if (error) {
-      console.error('Failed to grant access:', error.message);
-      throw error;
+  // Debounced email search as the admin types in the "Add user" field.
+  useEffect(() => {
+    if (userQuery.trim().length < 2 || selectedUser?.email === userQuery) {
+      setUserResults([]);
+      return;
     }
+    let cancelled = false;
+    setIsSearchingUsers(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/admin/users?query=${encodeURIComponent(userQuery.trim())}`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!res.ok) throw new Error(`Search failed (${res.status})`);
+        const data = await res.json();
+        if (!cancelled) setUserResults(data.users || []);
+      } catch (error) {
+        if (!cancelled) console.error('User search failed:', error.message);
+      } finally {
+        if (!cancelled) setIsSearchingUsers(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [userQuery, selectedUser, accessToken]);
+
+  const pickUser = (user) => {
+    setSelectedUser(user);
+    setUserQuery(user.email || user.id);
+    setUserResults([]);
+    setUserEmails((prev) => (user.id in prev ? prev : { ...prev, [user.id]: user.email }));
+  };
+
+  const clearSelectedUser = () => {
+    setSelectedUser(null);
+    setUserQuery('');
+    setUserResults([]);
   };
 
   const handleGrant = async (e) => {
     e.preventDefault();
     setFeedback(null);
 
-    const trimmedUserId = targetUserId.trim();
-    const trimmedDeviceId = deviceId.trim();
-    const parsedSensorIndex = Number(sensorIndex);
-
-    if (!trimmedUserId) {
-      setFeedback({ type: 'error', text: 'User ID is required.' });
+    const sensor = sensorByKey.get(selectedSensorKey);
+    if (!sensor) {
+      setFeedback({ type: 'error', text: 'Choose a sensor to grant access to.' });
       return;
     }
-    if (!trimmedDeviceId) {
-      setFeedback({ type: 'error', text: 'Device ID is required.' });
-      return;
-    }
-    if (sensorIndex === '' || !Number.isInteger(parsedSensorIndex) || parsedSensorIndex < 0) {
-      setFeedback({ type: 'error', text: 'Sensor index must be a non-negative whole number.' });
+    if (!selectedUser) {
+      setFeedback({ type: 'error', text: 'Search for and select a user first.' });
       return;
     }
 
     setIsGranting(true);
     try {
-      await grantDeviceAccess(trimmedUserId, trimmedDeviceId, parsedSensorIndex);
-      setFeedback({ type: 'success', text: `Access to device ${trimmedDeviceId}, sensor ${parsedSensorIndex} granted.` });
-      setTargetUserId('');
-      setDeviceId('');
-      setSensorIndex('');
+      const { error } = await supabase
+        .from('device_permissions')
+        .insert([{ user_id: selectedUser.id, device_id: sensor.deviceId, sensor_index: sensor.sensorIndex }]);
+
+      if (error) {
+        // Postgres unique_violation — this grant already exists.
+        if (error.code === '23505') {
+          setFeedback({ type: 'error', text: `${selectedUser.email} already has access to ${sensor.label}.` });
+        } else {
+          throw error;
+        }
+        return;
+      }
+
+      setFeedback({ type: 'success', text: `Granted ${selectedUser.email} access to ${sensor.label}.` });
+      setSelectedSensorKey('');
+      clearSelectedUser();
       await fetchPermissions();
     } catch (error) {
       setFeedback({ type: 'error', text: `Failed to grant access: ${error.message}` });
@@ -82,22 +158,43 @@ export default function AdminPanel({ supabase }) {
     }
   };
 
-  const handleRevoke = async (id) => {
-    setRevokingId(id);
+  const handleRevoke = async (permission) => {
+    const email = userEmails[permission.user_id] || permission.user_id;
+    const label = labelForPermission(permission);
+    if (!window.confirm(`Revoke ${email}'s access to ${label}?`)) return;
+
+    setRevokingId(permission.id);
     setFeedback(null);
     const { error } = await supabase
       .from('device_permissions')
       .delete()
-      .eq('id', id);
+      .eq('id', permission.id);
 
     if (error) {
       console.error('Failed to revoke access:', error.message);
       setFeedback({ type: 'error', text: `Failed to revoke access: ${error.message}` });
     } else {
-      setPermissions((prev) => prev.filter((p) => p.id !== id));
+      setPermissions((prev) => prev.filter((p) => p.id !== permission.id));
+      setFeedback({ type: 'success', text: `Revoked ${email}'s access to ${label}.` });
     }
     setRevokingId(null);
   };
+
+  // Group flat permission rows by user so an admin can scan "who has access to what" at a glance.
+  const groupedByUser = useMemo(() => {
+    const groups = new Map();
+    for (const permission of permissions) {
+      if (!groups.has(permission.user_id)) groups.set(permission.user_id, []);
+      groups.get(permission.user_id).push(permission);
+    }
+    return [...groups.entries()]
+      .map(([userId, perms]) => ({
+        userId,
+        email: userEmails[userId] || userId,
+        permissions: perms.sort((a, b) => labelForPermission(a).localeCompare(labelForPermission(b))),
+      }))
+      .sort((a, b) => a.email.localeCompare(b.email));
+  }, [permissions, userEmails, labelForPermission]);
 
   return (
     <div className="space-y-6">
@@ -123,78 +220,102 @@ export default function AdminPanel({ supabase }) {
       <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm">
         <h3 className="font-semibold text-slate-900 dark:text-slate-100 mb-4">Grant Access</h3>
         <form onSubmit={handleGrant} className="flex flex-col sm:flex-row gap-4 sm:items-end">
-          <div className="flex-1">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">User ID</label>
-            <input
-              type="text"
-              value={targetUserId}
-              onChange={(e) => setTargetUserId(e.target.value)}
-              placeholder="e.g. 3f1b2c4d-..."
-              className="w-full px-4 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all font-mono text-sm"
-              required
-            />
+          <div className="flex-1 relative">
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">User</label>
+            <div className="relative">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                value={userQuery}
+                onChange={(e) => {
+                  setUserQuery(e.target.value);
+                  setSelectedUser(null);
+                }}
+                placeholder="Search by email..."
+                className="w-full pl-9 pr-8 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all text-sm"
+                autoComplete="off"
+              />
+              {userQuery && (
+                <button
+                  type="button"
+                  onClick={clearSelectedUser}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                  title="Clear"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+            {(isSearchingUsers || userResults.length > 0) && !selectedUser && (
+              <div className="absolute z-10 mt-1 w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                {isSearchingUsers ? (
+                  <div className="px-3 py-2 text-sm text-slate-500 dark:text-slate-400 flex items-center gap-2">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Searching...
+                  </div>
+                ) : (
+                  userResults.map((u) => (
+                    <button
+                      key={u.id}
+                      type="button"
+                      onClick={() => pickUser(u)}
+                      className="block w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700"
+                    >
+                      {u.email}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
           </div>
           <div className="flex-1">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Device ID</label>
-            <input
-              type="text"
-              value={deviceId}
-              onChange={(e) => setDeviceId(e.target.value)}
-              placeholder="e.g. 20E7C8ECE5B4"
-              className="w-full px-4 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all font-mono text-sm"
-              required
-            />
-          </div>
-          <div className="sm:w-40">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Sensor Index</label>
-            <input
-              type="number"
-              min="0"
-              value={sensorIndex}
-              onChange={(e) => setSensorIndex(e.target.value)}
-              placeholder="0"
-              className="w-full px-4 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all"
-              required
-            />
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Sensor</label>
+            <select
+              value={selectedSensorKey}
+              onChange={(e) => setSelectedSensorKey(e.target.value)}
+              className="w-full px-4 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all text-sm"
+            >
+              <option value="">Choose a sensor...</option>
+              {sensors.map((sensor) => (
+                <option key={sensor.key} value={sensor.key}>
+                  {sensor.label}
+                </option>
+              ))}
+            </select>
           </div>
           <button
             type="submit"
-            disabled={isGranting}
+            disabled={isGranting || !selectedUser || !selectedSensorKey}
             className="flex items-center justify-center gap-2 bg-slate-900 text-white font-semibold py-2.5 px-5 rounded-lg hover:bg-slate-800 dark:bg-amber-500 dark:text-slate-900 dark:hover:bg-amber-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isGranting ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
             Grant
           </button>
         </form>
+        {sensors.length === 0 && (
+          <p className="text-xs text-slate-400 dark:text-slate-500 mt-3">
+            No sensors have reported data yet, so there's nothing to grant access to.
+          </p>
+        )}
       </div>
 
-      {/* Existing Permissions */}
+      {/* Existing Permissions, grouped by user */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm">
         <h3 className="font-semibold text-slate-900 dark:text-slate-100 mb-4">Current Permissions</h3>
         {isLoadingList ? (
           <div className="text-sm text-slate-500 dark:text-slate-400">Loading...</div>
-        ) : permissions.length === 0 ? (
+        ) : groupedByUser.length === 0 ? (
           <div className="text-sm text-slate-500 dark:text-slate-400">No permissions have been granted yet.</div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-800">
-                  <th className="pb-2 font-medium">User ID</th>
-                  <th className="pb-2 font-medium">Device</th>
-                  <th className="pb-2 font-medium">Sensor</th>
-                  <th className="pb-2 font-medium text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {permissions.map((permission) => (
-                  <tr key={permission.id} className="border-b border-slate-50 dark:border-slate-800 last:border-0">
-                    <td className="py-2.5 font-mono text-slate-700 dark:text-slate-300">{permission.user_id}</td>
-                    <td className="py-2.5 font-mono text-slate-700 dark:text-slate-300">{permission.device_id}</td>
-                    <td className="py-2.5 text-slate-700 dark:text-slate-300">Sensor {permission.sensor_index}</td>
-                    <td className="py-2.5 text-right">
+          <div className="space-y-5">
+            {groupedByUser.map((group) => (
+              <div key={group.userId} className="border border-slate-100 dark:border-slate-800 rounded-xl p-4">
+                <div className="font-medium text-slate-900 dark:text-slate-100 text-sm mb-2">{group.email}</div>
+                <ul className="divide-y divide-slate-50 dark:divide-slate-800">
+                  {group.permissions.map((permission) => (
+                    <li key={permission.id} className="flex items-center justify-between py-2 text-sm">
+                      <span className="text-slate-700 dark:text-slate-300">{labelForPermission(permission)}</span>
                       <button
-                        onClick={() => handleRevoke(permission.id)}
+                        onClick={() => handleRevoke(permission)}
                         disabled={revokingId === permission.id}
                         className="inline-flex items-center gap-1.5 text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 disabled:opacity-50 transition-colors"
                         title="Revoke access"
@@ -206,14 +327,15 @@ export default function AdminPanel({ supabase }) {
                         )}
                         Revoke
                       </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
           </div>
         )}
       </div>
     </div>
   );
 }
+

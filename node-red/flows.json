@@ -1,0 +1,159 @@
+[
+    {
+        "id": "7b42637342905f3d",
+        "type": "tab",
+        "label": "v2",
+        "disabled": false,
+        "info": "Production MQTT -> Supabase ingestion, running on the same Pi as the MQTT broker.\n\nSee ../README.md for the fixes applied here vs. the original export:\n- \"Format for Supabase\" now validates the payload shape before mapping, instead of throwing\n  (and silently dropping the message) on a malformed/unexpected MQTT payload.\n- The HTTP response is now checked; failed inserts are logged via node.error() instead of\n  disappearing into an unwired output.\n- Configure a username/password on the \"Local Pi Broker\" node (Security tab) once the ESP32\n  firmware's MQTT_USERNAME/MQTT_PASSWORD are set (see ../esp32 code/config.h) \u2014 an\n  unauthenticated broker lets anything on the LAN publish or read sensor data.\n\n\"Push to Supabase\" authenticates with the service_role key, which bypasses RLS \u2014 correct for\na trusted backend process like this one. Never put that key anywhere it could reach a browser.",
+        "env": []
+    },
+    {
+        "id": "63ee98a161292c27",
+        "type": "function",
+        "z": "7b42637342905f3d",
+        "name": "Format for Supabase",
+        "func": "const payload = msg.payload;\n\n// Defend against malformed/unexpected MQTT payloads instead of throwing and losing the message.\nif (!payload || !Array.isArray(payload.temperatures) || typeof payload.device_id !== 'string') {\n    node.warn(`Ignoring malformed MQTT payload: ${JSON.stringify(payload)}`);\n    return null;\n}\n\n// Firmware sends an NTP-synced epoch-seconds timestamp; fall back to \"now\" if it's ever missing\nconst timestamp = Number.isFinite(payload.timestamp)\n    ? new Date(payload.timestamp * 1000).toISOString()\n    : new Date().toISOString();\n\nconst rows = payload.temperatures\n    .map((temperature_c, sensor_index) => ({\n        sensor_index,\n        temperature_c,\n        timestamp,\n        device_id: payload.device_id\n    }))\n    // Disconnected probes are published as `null` (or any other non-number) — drop them\n    // instead of inserting bogus rows.\n    .filter(row => typeof row.temperature_c === 'number' && Number.isFinite(row.temperature_c));\n\nif (rows.length === 0) return null;\n\nmsg.payload = rows;\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 760,
+        "y": 440,
+        "wires": [
+            [
+                "2ebb6b3827422759",
+                "9eb6d132e789cebf"
+            ]
+        ]
+    },
+    {
+        "id": "2ebb6b3827422759",
+        "type": "http request",
+        "z": "7b42637342905f3d",
+        "name": "Push to Supabase",
+        "method": "POST",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "https://swbcwtrijguodjaxyitm.supabase.co/rest/v1/sensor_data",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": true,
+        "headers": [
+            {
+                "keyType": "other",
+                "keyValue": "apikey",
+                "valueType": "other",
+                "valueValue": ""
+            },
+            {
+                "keyType": "other",
+                "keyValue": "Authorization",
+                "valueType": "other",
+                "valueValue": "Bearer"
+            },
+            {
+                "keyType": "other",
+                "keyValue": "Content-Type",
+                "valueType": "other",
+                "valueValue": "application/json"
+            }
+        ],
+        "x": 1010,
+        "y": 440,
+        "wires": [
+            [
+                "a1b2c3d4e5f6a7b8"
+            ]
+        ]
+    },
+    {
+        "id": "a1b2c3d4e5f6a7b8",
+        "type": "function",
+        "z": "7b42637342905f3d",
+        "name": "Handle Supabase Response",
+        "func": "if (msg.statusCode >= 400) {\n    node.error(`Supabase insert failed (${msg.statusCode}): ${msg.payload}`, msg);\n    node.status({ fill: 'red', shape: 'dot', text: `HTTP ${msg.statusCode} @ ${new Date().toLocaleTimeString()}` });\n} else {\n    node.status({ fill: 'green', shape: 'dot', text: `ok @ ${new Date().toLocaleTimeString()}` });\n}\nreturn null;",
+        "outputs": 0,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1010,
+        "y": 490,
+        "wires": []
+    },
+    {
+        "id": "9eb6d132e789cebf",
+        "type": "debug",
+        "z": "7b42637342905f3d",
+        "name": "Debug Output",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 990,
+        "y": 560,
+        "wires": []
+    },
+    {
+        "id": "05f145415d362638",
+        "type": "mqtt in",
+        "z": "7b42637342905f3d",
+        "name": "ESP32 Temp Data",
+        "topic": "home/sensors/temp",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "mqtt_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 530,
+        "y": 440,
+        "wires": [
+            [
+                "63ee98a161292c27"
+            ]
+        ]
+    },
+    {
+        "id": "mqtt_broker",
+        "type": "mqtt-broker",
+        "name": "Local Pi Broker",
+        "broker": "localhost",
+        "port": "1883",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    }
+]

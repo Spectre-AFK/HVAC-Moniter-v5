@@ -77,9 +77,19 @@ Supabase connection details are read from environment variables (see [src/App.js
 
 Copy `.env.example` to `.env` and fill in your project's values. `.env` is git-ignored, so it won't be committed. Note that Vite exposes any `VITE_`-prefixed variable to the client bundle, so continue to rely on Supabase Row Level Security to protect your data — the anon key is not a secret, but should still be kept out of source control.
 
+## Verifying Row Level Security
+
+The RLS policies below are what actually enforce access control — the client-side `isAdmin`
+checks in the app are UI-only and don't stop a signed-in user from calling Supabase directly.
+Run [supabase/verify_rls.sql](../supabase/verify_rls.sql) in the Supabase SQL editor any time
+(especially after first setup, or after changing policies) to confirm RLS is enabled and which
+policies are actually attached, rather than assuming the setup SQL below was applied.
+
 ## Admin Access
 
 The admin panel ([src/AdminPanel.jsx](src/AdminPanel.jsx)) lets an admin grant or revoke a user's access to a specific sensor on a specific device by inserting/deleting rows in `device_permissions`. `sensor_index` alone isn't unique — every ESP32 numbers its own sensors starting at 0 — so grants are keyed by `device_id` + `sensor_index` together. It's shown in the nav (gear icon) only when the signed-in user's session has `app_metadata.role === 'admin'`.
+
+The grant form searches for users by email (autocomplete) and picks the sensor from a dropdown populated with sensors that have reported data, instead of requiring the admin to paste a raw user UUID or type a device ID/sensor index by hand. The permissions list is grouped by user (resolved to an email) rather than shown as a flat table of raw IDs. Both the search and the email lookups shown in the permissions list call an admin-only Worker endpoint, `GET /api/admin/users` (see [worker/index.js](iot-dashboard/worker/index.js)), since only the Supabase service role key — not the anon key used by the browser client — can query the Admin Users API. That endpoint requires `SUPABASE_SERVICE_ROLE_KEY` to be set as a Worker secret (see below) and independently re-checks `app_metadata.role === 'admin'` server-side, so it can't be reached by a non-admin even if they call it directly.
 
 If you created `device_permissions` before this `device_id` column existed, add it with:
 
@@ -158,7 +168,10 @@ using (
 
 No frontend changes are required for this — [src/App.jsx](src/App.jsx) already derives its sensor selector and "awaiting telemetry" state from whatever rows Supabase returns, so it naturally reflects whatever the RLS policy allows.
 
-**Note:** this only covers reads. If your ESP32 devices insert rows into `sensor_data` using the anon key, enabling RLS here will also block those inserts unless you add a matching `insert` policy (or have the devices write via the service role key / a server-side function, which bypasses RLS).
+**Note:** this only covers reads. Sensor rows are written by the ingestion flow described below
+([node-red](../node-red) in production, or [mqtt-bridge](../mqtt-bridge) as a Node.js
+alternative), both using the Supabase **service role key**, which bypasses RLS entirely, so
+enabling this policy won't affect ingestion.
 
 ## Naming Sensors
 
@@ -256,6 +269,19 @@ And set the non-secret `ALERT_FROM_EMAIL` (the "from" address for alert emails) 
 
 **Note:** Cron Triggers only run on the deployed Worker, not `wrangler dev` — to test the alert check locally, temporarily call `checkAlertRules(env)` from an HTTP route, or use `wrangler dev --test-scheduled` and hit `/__scheduled`.
 
+After deploying, an admin can hit `GET /api/health` (with their Supabase auth token) to confirm those secrets actually made it into the Worker — it reports which required secrets are set (never their values) rather than only surfacing a missing key as a silent skipped-alert log line in `wrangler tail`.
+
+## Data Ingestion (MQTT → Supabase)
+
+The ESP32 boards ([esp32 code](../esp32%20code)) only publish readings to a local MQTT broker — nothing in `iot-dashboard/` reads that broker directly. That's handled by a separate always-on process:
+
+- **[node-red](../node-red)** — the flow actually running in production, on the same Pi as the MQTT broker. See its README for import instructions and an important note about the Supabase key it uses.
+- **[mqtt-bridge](../mqtt-bridge)** — a Node.js equivalent, useful if you'd rather not run Node-RED.
+
+Either way, run it on a machine that can reach both the broker (usually the same LAN as the ESP32s) and the internet.
+
+Both the ESP32 firmware and the bridge/flow support MQTT username/password auth (configure a username/password on your broker, then set it via the ESP32's captive portal and the bridge's `.env` / Node-RED's broker config) — without it, any device on the network can publish fake readings or read every sensor's data.
+
 ## Deployment
 
 This app deploys as a single [Cloudflare Worker](https://developers.cloudflare.com/workers/) that serves the built static assets and the `/api/anomaly-summary` endpoint (see [wrangler.jsonc](wrangler.jsonc)):
@@ -276,6 +302,7 @@ iot-dashboard/
 ├── src/
 │   ├── App.jsx         # Main dashboard UI, auth, and data-fetching logic
 │   ├── anomalyDetection.js # Plain-statistics anomaly checks (z-score, trend, flatline)
+│   ├── anomalyDetection.test.js # Vitest unit tests for the checks above
 │   ├── LandingPage.jsx # Public marketing page with a simulated live demo
 │   ├── AdminPanel.jsx  # Admin-only device access management
 │   ├── ThemeToggle.jsx # Light/dark mode toggle button
@@ -285,4 +312,16 @@ iot-dashboard/
 ├── index.html
 ├── wrangler.jsonc
 └── vite.config.js
+
+node-red/               # Production MQTT broker → Supabase sensor_data ingestion flow
+├── flows.json
+└── README.md
+
+mqtt-bridge/            # Node.js alternative to node-red/, not currently deployed
+├── bridge.js
+└── .env.example
+
+esp32 code/             # Arduino firmware for the ESP32 sensor boards
+├── main.ino
+└── config.h
 ```

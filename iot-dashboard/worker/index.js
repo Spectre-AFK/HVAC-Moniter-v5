@@ -7,12 +7,40 @@ const MAX_FLAGS = 50;
 // llama-3.1-8b-instruct (non "-fast") was deprecated 2026-05-30; this variant is current.
 const MODEL = '@cf/meta/llama-3.1-8b-instruct-fast';
 
+// Best-effort per-user rate limit for /api/anomaly-summary: this Map lives in the isolate's
+// memory, so it resets on cold start and isn't shared across isolates/regions. That's fine
+// here — the goal is just to stop accidental spam loops from burning Workers AI quota, not
+// to provide an exact distributed limit.
+const RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000;
+const RATE_LIMIT_MAX_REQUESTS = 10;
+const rateLimitBuckets = new Map();
+
+function isRateLimited(userId) {
+  const now = Date.now();
+  const recent = (rateLimitBuckets.get(userId) ?? []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+  if (recent.length >= RATE_LIMIT_MAX_REQUESTS) {
+    rateLimitBuckets.set(userId, recent);
+    return true;
+  }
+  recent.push(now);
+  rateLimitBuckets.set(userId, recent);
+  return false;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
     if (url.pathname === '/api/anomaly-summary' && request.method === 'POST') {
       return handleAnomalySummary(request, env);
+    }
+
+    if (url.pathname === '/api/health' && request.method === 'GET') {
+      return handleHealthCheck(request, env);
+    }
+
+    if (url.pathname === '/api/admin/users' && request.method === 'GET') {
+      return handleAdminUsers(request, env, url);
     }
 
     return env.ASSETS.fetch(request);
@@ -27,6 +55,10 @@ async function handleAnomalySummary(request, env) {
   const user = await getAuthenticatedUser(request, env);
   if (!user) {
     return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  if (isRateLimited(user.id)) {
+    return Response.json({ error: 'Too many requests, please slow down.' }, { status: 429 });
   }
 
   let body;
@@ -87,6 +119,77 @@ async function handleAnomalySummary(request, env) {
     console.error('Workers AI request failed:', err);
     return Response.json({ error: 'AI summary failed' }, { status: 502 });
   }
+}
+
+// Admin-only: reports which secrets required for alerts/AI summaries are configured, without
+// revealing their values, so a missing wrangler secret shows up here instead of only in
+// `wrangler tail` logs the next time the cron silently no-ops.
+async function handleHealthCheck(request, env) {
+  const user = await getAuthenticatedUser(request, env);
+  if (!user || user?.app_metadata?.role !== 'admin') {
+    return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  return Response.json({
+    ai: { workersAiBinding: Boolean(env.AI) },
+    alerts: {
+      supabaseServiceRoleKey: Boolean(env.SUPABASE_SERVICE_ROLE_KEY),
+      resendApiKey: Boolean(env.RESEND_API_KEY),
+      alertFromEmail: Boolean(env.ALERT_FROM_EMAIL),
+    },
+  });
+}
+
+const MAX_USER_SEARCH_RESULTS = 20;
+const MAX_USER_ID_LOOKUPS = 50;
+
+// Admin-only: looks up Supabase users for the AdminPanel's grant form, either by email
+// substring (?query=) or by a batch of known ids (?ids=a,b,c) to resolve ids already stored
+// in device_permissions back to a display email. Uses the service role key because the
+// Admin Users API isn't reachable with the anon key.
+async function handleAdminUsers(request, env, url) {
+  const user = await getAuthenticatedUser(request, env);
+  if (!user || user?.app_metadata?.role !== 'admin') {
+    return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  if (!env.SUPABASE_SERVICE_ROLE_KEY) {
+    return Response.json({ error: 'SUPABASE_SERVICE_ROLE_KEY is not configured' }, { status: 503 });
+  }
+
+  const idsParam = url.searchParams.get('ids');
+  if (idsParam) {
+    const ids = [...new Set(idsParam.split(',').map((id) => id.trim()).filter(Boolean))].slice(0, MAX_USER_ID_LOOKUPS);
+    const users = await Promise.all(
+      ids.map(async (id) => {
+        const res = await fetch(`${env.SUPABASE_URL}/auth/v1/admin/users/${id}`, { headers: supabaseAdminHeaders(env) });
+        if (!res.ok) return null;
+        const u = await res.json();
+        return u?.id ? { id: u.id, email: u.email ?? null } : null;
+      })
+    );
+    return Response.json({ users: users.filter(Boolean) });
+  }
+
+  const query = (url.searchParams.get('query') || '').trim().toLowerCase();
+  if (query.length < 2) {
+    return Response.json({ error: 'query must be at least 2 characters' }, { status: 400 });
+  }
+
+  const res = await fetch(`${env.SUPABASE_URL}/auth/v1/admin/users?per_page=200`, {
+    headers: supabaseAdminHeaders(env),
+  });
+  if (!res.ok) {
+    console.error('Failed to list users:', await res.text());
+    return Response.json({ error: 'Failed to search users' }, { status: 502 });
+  }
+
+  const body = await res.json();
+  const users = (body?.users ?? [])
+    .filter((u) => u.email?.toLowerCase().includes(query))
+    .slice(0, MAX_USER_SEARCH_RESULTS)
+    .map((u) => ({ id: u.id, email: u.email }));
+
+  return Response.json({ users });
 }
 
 // Verifies the bearer token against Supabase Auth rather than trusting the client.
@@ -190,6 +293,20 @@ async function getUserEmail(userId, env) {
   return user?.email ?? null;
 }
 
+// Retries a transient failure (network error or 5xx) once after a short delay so a single
+// blip in the Resend API doesn't silently drop an alert the user is relying on.
+async function fetchWithRetry(url, options, retries = 1, delayMs = 1000) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.ok || res.status < 500 || attempt >= retries) return res;
+    } catch (err) {
+      if (attempt >= retries) throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+}
+
 async function sendAlertEmail(rule, { tempF, direction }, env) {
   if (!env.RESEND_API_KEY || !env.ALERT_FROM_EMAIL) {
     console.error('RESEND_API_KEY or ALERT_FROM_EMAIL is not set; skipping alert email.');
@@ -213,7 +330,7 @@ async function sendAlertEmail(rule, { tempF, direction }, env) {
       : `${sensorLabel} is reading ${tempF.toFixed(1)}\u00b0F, which is ${direction} your ` +
         `${direction === 'above' ? rule.high_f : rule.low_f}\u00b0F threshold.`;
 
-  const res = await fetch('https://api.resend.com/emails', {
+  const res = await fetchWithRetry('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${env.RESEND_API_KEY}`,

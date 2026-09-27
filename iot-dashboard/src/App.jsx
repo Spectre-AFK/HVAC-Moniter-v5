@@ -446,7 +446,16 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         
         {view === 'admin' && isAdmin ? (
-          <AdminPanel supabase={supabase} />
+          <AdminPanel
+            supabase={supabase}
+            accessToken={session.access_token}
+            sensors={(dashboard?.perSensor ?? []).map((sensor) => ({
+              key: sensor.key,
+              deviceId: sensor.deviceId,
+              sensorIndex: sensor.sensorIndex,
+              label: sensorLabel(sensor.key, sensor.deviceId, sensor.sensorIndex),
+            }))}
+          />
         ) : view === 'alerts' ? (
           <AlertSettings
             supabase={supabase}

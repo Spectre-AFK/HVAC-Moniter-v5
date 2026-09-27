@@ -1,0 +1,15 @@
+{
+  "name": "hvac-mqtt-bridge",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Subscribes to the local MQTT broker the ESP32 sensors publish to and writes readings into Supabase's sensor_data table.",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "type": "module",
+  "dependencies": {
+    "dotenv": "^18.0.4",
+    "mqtt": "^5.16.0"
+  }
+}
