@@ -7,6 +7,12 @@ const MAX_FLAGS = 50;
 // llama-3.1-8b-instruct (non "-fast") was deprecated 2026-05-30; this variant is current.
 const MODEL = '@cf/meta/llama-3.1-8b-instruct-fast';
 
+// Kept in sync with src/App.jsx's COMPANY_* constants for consistent branding in alert emails.
+const COMPANY_NAME = 'Accurate Air Conditioning';
+const COMPANY_PHONE = '(520) 230-5453';
+const COMPANY_EMAIL = 'contact@aaronjauregui.com';
+const BRAND_COLOR = '#d97706'; // amber-600, matches the dashboard's accent color
+
 // Best-effort per-user rate limit for /api/anomaly-summary: this Map lives in the isolate's
 // memory, so it resets on cold start and isn't shared across isolates/regions. That's fine
 // here — the goal is just to stop accidental spam loops from burning Workers AI quota, not
@@ -293,6 +299,19 @@ async function getUserEmail(userId, env) {
   return user?.email ?? null;
 }
 
+// Mirrors the "Sensor N · Device XXXX" fallback format used in src/App.jsx's sensorLabel().
+async function getSensorLabel(deviceId, sensorIndex, env) {
+  const shortDeviceId = deviceId ? deviceId.slice(-4).toUpperCase() : '????';
+  const res = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/sensor_names?device_id=eq.${encodeURIComponent(deviceId)}` +
+      `&sensor_index=eq.${sensorIndex}&select=name&limit=1`,
+    { headers: supabaseAdminHeaders(env) }
+  );
+  const [row] = res.ok ? await res.json() : [];
+  const name = row?.name?.trim() || `Sensor ${sensorIndex}`;
+  return `${name} · Device ${shortDeviceId}`;
+}
+
 // Retries a transient failure (network error or 5xx) once after a short delay so a single
 // blip in the Resend API doesn't silently drop an alert the user is relying on.
 async function fetchWithRetry(url, options, retries = 1, delayMs = 1000) {
@@ -319,16 +338,40 @@ async function sendAlertEmail(rule, { tempF, direction }, env) {
     return;
   }
 
-  const sensorLabel = `device ${rule.device_id}, sensor ${rule.sensor_index}`;
-  const subject =
-    direction === 'cleared'
-      ? `HVAC Alert cleared: ${sensorLabel}`
-      : `HVAC Alert: ${sensorLabel} is ${direction} threshold`;
-  const text =
-    direction === 'cleared'
-      ? `${sensorLabel} is back to ${tempF.toFixed(1)}\u00b0F, within your configured range.`
-      : `${sensorLabel} is reading ${tempF.toFixed(1)}\u00b0F, which is ${direction} your ` +
-        `${direction === 'above' ? rule.high_f : rule.low_f}\u00b0F threshold.`;
+  const sensorLabel = await getSensorLabel(rule.device_id, rule.sensor_index, env);
+  const isCleared = direction === 'cleared';
+  const subject = isCleared ? `Alert cleared: ${sensorLabel}` : `Alert: ${sensorLabel} is ${direction} threshold`;
+  const threshold = direction === 'above' ? rule.high_f : rule.low_f;
+  const text = isCleared
+    ? `${sensorLabel} is back to ${tempF.toFixed(1)}\u00b0F, within your configured range.`
+    : `${sensorLabel} is reading ${tempF.toFixed(1)}\u00b0F, which is ${direction} your ${threshold}\u00b0F threshold.`;
+
+  const statusColor = isCleared ? '#059669' : '#dc2626'; // emerald-600 / red-600
+  const statusText = isCleared ? 'Back to normal' : 'Threshold breached';
+  const detailRow = isCleared
+    ? ''
+    : `<tr><td style="padding:4px 0;color:#64748b;font-size:14px;">Threshold</td>` +
+      `<td style="padding:4px 0;color:#0f172a;font-size:14px;text-align:right;">${threshold}\u00b0F (${direction})</td></tr>`;
+
+  const html = `
+    <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:480px;margin:0 auto;">
+      <div style="background:${BRAND_COLOR};padding:20px 24px;border-radius:12px 12px 0 0;">
+        <span style="color:#fff;font-size:18px;font-weight:700;">${COMPANY_NAME}</span>
+      </div>
+      <div style="border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;padding:24px;">
+        <p style="margin:0 0 4px;color:${statusColor};font-weight:700;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;">${statusText}</p>
+        <h1 style="margin:0 0 16px;color:#0f172a;font-size:20px;">${sensorLabel}</h1>
+        <table style="width:100%;border-collapse:collapse;">
+          <tr><td style="padding:4px 0;color:#64748b;font-size:14px;">Current reading</td>
+              <td style="padding:4px 0;color:#0f172a;font-size:14px;text-align:right;font-weight:600;">${tempF.toFixed(1)}\u00b0F</td></tr>
+          ${detailRow}
+        </table>
+        <p style="margin:20px 0 0;color:#64748b;font-size:13px;">${text}</p>
+      </div>
+      <p style="text-align:center;color:#94a3b8;font-size:12px;margin-top:16px;">
+        ${COMPANY_NAME} &middot; ${COMPANY_PHONE} &middot; ${COMPANY_EMAIL}
+      </p>
+    </div>`;
 
   const res = await fetchWithRetry('https://api.resend.com/emails', {
     method: 'POST',
@@ -336,7 +379,7 @@ async function sendAlertEmail(rule, { tempF, direction }, env) {
       Authorization: `Bearer ${env.RESEND_API_KEY}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ from: env.ALERT_FROM_EMAIL, to: email, subject, text }),
+    body: JSON.stringify({ from: env.ALERT_FROM_EMAIL, to: email, subject, text, html }),
   });
   if (!res.ok) console.error('Failed to send alert email:', await res.text());
 }
