@@ -1,83 +1,80 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea
 } from 'recharts';
 import {
-  Thermometer, Activity, BellRing, Radio, Phone, Mail, ArrowRight, AlertTriangle, Users
+  Thermometer, Activity, BellRing, Radio, Phone, Mail, ArrowRight, AlertTriangle, Users,
+  TrendingUp, Repeat, Clock, Cpu, MailCheck, ShieldCheck
 } from 'lucide-react';
 import ThemeToggle from './ThemeToggle';
 
 // Simulated sensors for the marketing demo — no real data, no login required.
 // Each scenario swaps in different sensor readings so visitors can see what the dashboard
 // looks like both on a normal day and when something actually needs attention.
+// Per-sensor safe range used to color-code cards and the chart threshold line below —
+// deliberately per sensor (not one universal hot/cold split) so a cooler warming into the
+// 50s still reads as "out of range" even though 58°F alone isn't objectively hot.
 const SCENARIOS = [
   {
     key: 'normal',
     label: 'A Normal Day',
     sensors: [
-      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 5, color: '#f59e0b' },
-      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, color: '#3b82f6' },
-      { id: 2, name: 'Walk-in Cooler', base: 38, amplitude: 3, color: '#10b981' },
+      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 5, safeMin: 65, safeMax: 85, color: '#f59e0b' },
+      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, safeMin: 60, safeMax: 75, color: '#3b82f6' },
+      { id: 2, name: 'Walk-in Cooler', base: 38, amplitude: 3, safeMin: 33, safeMax: 45, color: '#10b981' },
     ],
     alert: null,
   },
   {
-    key: 'overheating',
-    label: 'Rooftop Overheating',
-    sensors: [
-      { id: 0, name: 'Rooftop Unit 1', base: 92, amplitude: 3, color: '#f59e0b' },
-      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, color: '#3b82f6' },
-      { id: 2, name: 'Walk-in Cooler', base: 38, amplitude: 3, color: '#10b981' },
-    ],
-    alert: {
-      title: 'Example: 1 Sensor Needs Attention',
-      message: '"Rooftop Unit 1" has climbed above its safe range. You and anyone else watching that sensor ' +
-        'would already have an email about it — and another once it\'s back to normal.',
-    },
-  },
-  {
     key: 'cooler',
-    label: 'Cooler Door Left Open',
+    label: 'Walk-in Cooler Too Warm',
     sensors: [
-      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 5, color: '#f59e0b' },
-      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, color: '#3b82f6' },
-      { id: 2, name: 'Walk-in Cooler', base: 58, amplitude: 4, color: '#10b981' },
+      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 5, safeMin: 65, safeMax: 85, color: '#f59e0b' },
+      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, safeMin: 60, safeMax: 75, color: '#3b82f6' },
+      { id: 2, name: 'Walk-in Cooler', base: 58, amplitude: 4, safeMin: 33, safeMax: 45, color: '#10b981' },
     ],
     alert: {
       title: 'Example: 1 Sensor Needs Attention',
+      affectedSensorId: 2,
       message: '"Walk-in Cooler" has been trending warmer over the last hour — often a sign a door was left open. ' +
         'You\'d get an email the moment it crosses your safe range.',
     },
   },
   {
-    key: 'offline',
-    label: 'Sensor Went Quiet',
+    key: 'drift',
+    label: 'Long-Term Drift Analysis',
     sensors: [
-      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 5, color: '#f59e0b' },
-      { id: 1, name: 'Server Closet', base: 68, amplitude: 0, jitter: 0, color: '#3b82f6' },
-      { id: 2, name: 'Walk-in Cooler', base: 38, amplitude: 3, color: '#10b981' },
+      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 3, drift: 0.15, driftCap: 10, safeMin: 65, safeMax: 85, color: '#f59e0b' },
+      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, safeMin: 60, safeMax: 75, color: '#3b82f6' },
+      { id: 2, name: 'Walk-in Cooler', base: 38, amplitude: 3, safeMin: 33, safeMax: 45, color: '#10b981' },
     ],
     alert: {
       title: 'Example: 1 Sensor Needs Attention',
-      message: '"Server Closet" has reported the exact same reading for a while now — usually a sign the sensor ' +
-        'itself has stopped working, not that the room stopped changing temperature.',
+      affectedSensorId: 0,
+      message: '"Rooftop Unit 1" hasn\'t crossed any threshold yet, but its average has been quietly climbing for ' +
+        'days — the kind of slow drift a daily glance would miss. Long-term trend analysis catches it early, ' +
+        'often weeks before it turns into a hard failure.',
     },
   },
 ];
 
 const HISTORY_LENGTH = 20;
 
-const getStatusColor = (tempF) => {
-  if (tempF > 85) return 'text-red-500 dark:text-red-400';
-  if (tempF < 45) return 'text-blue-500 dark:text-blue-400';
-  return 'text-amber-500 dark:text-amber-400';
+// Status is relative to each sensor's own safe range, not one universal hot/cold split —
+// a cooler that's crept up to 58°F is just as "out of range" as a rooftop unit at 95°F.
+const getStatusColor = (tempF, sensor) => {
+  if (tempF > sensor.safeMax) return 'text-red-500 dark:text-red-400';
+  if (tempF < sensor.safeMin) return 'text-blue-500 dark:text-blue-400';
+  return 'text-emerald-500 dark:text-emerald-400';
 };
 
-const getStatusBg = (tempF) => {
-  if (tempF > 85) return 'bg-red-50 border-red-200 dark:bg-red-950/40 dark:border-red-900';
-  if (tempF < 45) return 'bg-blue-50 border-blue-200 dark:bg-blue-950/40 dark:border-blue-900';
-  return 'bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-900';
+const getStatusBg = (tempF, sensor) => {
+  if (tempF > sensor.safeMax) return 'bg-red-50 border-red-200 dark:bg-red-950/40 dark:border-red-900';
+  if (tempF < sensor.safeMin) return 'bg-blue-50 border-blue-200 dark:bg-blue-950/40 dark:border-blue-900';
+  return 'bg-emerald-50 border-emerald-200 dark:bg-emerald-950/30 dark:border-emerald-900';
 };
+
+const isOutOfRange = (tempF, sensor) => tempF > sensor.safeMax || tempF < sensor.safeMin;
 
 const FEATURES = [
   {
@@ -87,8 +84,23 @@ const FEATURES = [
   },
   {
     icon: BellRing,
-    title: 'Smart Alerts',
-    description: 'Automatically watches for unusual swings, slow drifts, or sensors that stop reporting, then emails you the moment something needs attention — and again once it\'s resolved.',
+    title: 'Smart Threshold Alerts',
+    description: 'Set a safe high/low range per sensor and get an email the instant it\'s crossed — then another the moment it\'s back to normal.',
+  },
+  {
+    icon: TrendingUp,
+    title: 'Drift & Flatline Detection',
+    description: 'Statistical checks catch slow multi-day drift and sensors that quietly stop reporting — not just hard threshold breaches.',
+  },
+  {
+    icon: Repeat,
+    title: 'Short-Cycle Detection',
+    description: 'Watches every compressor on/off cycle and flags short-cycling early, often the first sign of a failing capacitor or low refrigerant.',
+  },
+  {
+    icon: Clock,
+    title: 'Routine Learning',
+    description: 'Learns each sensor\'s usual daily schedule and flags a setback or cycle that\'s late or missing entirely — not just bad temperatures.',
   },
   {
     icon: Users,
@@ -97,26 +109,50 @@ const FEATURES = [
   },
 ];
 
+const HOW_IT_WORKS = [
+  {
+    icon: Cpu,
+    title: 'Sensors report in',
+    description: 'Your ESP32 devices publish readings every few minutes, streamed straight into your dashboard.',
+  },
+  {
+    icon: ShieldCheck,
+    title: 'Four checks run automatically',
+    description: 'Thresholds, statistical anomalies, short-cycling, and routine learning all watch every reading — no setup required.',
+  },
+  {
+    icon: MailCheck,
+    title: 'You get an email',
+    description: 'The moment something needs attention, and a follow-up the moment it\'s resolved.',
+  },
+];
+
 function DemoSensorCard({ sensor, value }) {
+  const outOfRange = isOutOfRange(value, sensor);
   return (
-    <div className={`rounded-2xl p-6 border shadow-sm ${getStatusBg(value)}`}>
+    <div className={`rounded-2xl p-6 border shadow-sm transition-colors ${getStatusBg(value, sensor)} ${outOfRange ? 'ring-2 ring-red-400/60 dark:ring-red-500/50' : ''}`}>
       <div className="flex justify-between items-start mb-4">
         <div className="flex items-center gap-2">
           <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: sensor.color }} />
-          <Thermometer className={`w-5 h-5 ${getStatusColor(value)}`} />
+          <Thermometer className={`w-5 h-5 ${getStatusColor(value, sensor)}`} />
           <span className="font-semibold text-slate-900 dark:text-slate-100">{sensor.name}</span>
         </div>
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium bg-white/60 border-slate-200/50 text-slate-600 dark:bg-slate-800/60 dark:border-slate-700/50 dark:text-slate-300">
-          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-          LIVE
+        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium ${
+          outOfRange
+            ? 'bg-red-100 border-red-300 text-red-700 dark:bg-red-950/60 dark:border-red-800 dark:text-red-300'
+            : 'bg-white/60 border-slate-200/50 text-slate-600 dark:bg-slate-800/60 dark:border-slate-700/50 dark:text-slate-300'
+        }`}>
+          <span className={`w-2 h-2 rounded-full animate-pulse ${outOfRange ? 'bg-red-500' : 'bg-emerald-500'}`}></span>
+          {outOfRange ? 'OUT OF RANGE' : 'LIVE'}
         </div>
       </div>
       <div className="flex items-baseline gap-2">
-        <span className={`text-5xl font-extrabold tracking-tighter ${getStatusColor(value)}`}>
+        <span className={`text-5xl font-extrabold tracking-tighter ${getStatusColor(value, sensor)}`}>
           {value.toFixed(1)}°
         </span>
         <span className="text-xl font-bold text-slate-400 dark:text-slate-500">F</span>
       </div>
+      <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">Safe range: {sensor.safeMin}°–{sensor.safeMax}°F</p>
     </div>
   );
 }
@@ -144,11 +180,19 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
     for (const sensor of demoSensors) {
       const wave = Math.sin((tick + sensor.id * 3) / 4) * sensor.amplitude;
       const jitter = (Math.random() - 0.5) * (sensor.jitter ?? 0.6);
-      values[sensor.id] = sensor.base + wave + jitter;
+      // Drift creeps upward with time but is capped so a long-open tab doesn't run away forever.
+      const drift = sensor.drift ? Math.min(sensor.drift * tick, sensor.driftCap ?? Infinity) : 0;
+      values[sensor.id] = sensor.base + wave + jitter + drift;
     }
     return values;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, scenarioKey]);
+
+  // The sensor called out in the active scenario's alert, used to highlight its line and
+  // draw its safe-range threshold on the chart so the breach is visible, not just implied.
+  const alertSensor = scenario.alert
+    ? demoSensors.find((s) => s.id === scenario.alert.affectedSensorId)
+    : null;
 
   useEffect(() => {
     const point = { time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
@@ -185,7 +229,10 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
       </nav>
 
       {/* Hero */}
-      <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 text-center">
+      <section className="relative overflow-hidden max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 text-center">
+        <div className="pointer-events-none absolute inset-x-0 -top-24 flex justify-center -z-10">
+          <div className="h-72 w-[36rem] rounded-full bg-amber-400/20 dark:bg-amber-500/10 blur-3xl" />
+        </div>
         <div className="inline-flex items-center gap-2 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 dark:text-amber-400 dark:bg-amber-950/40 dark:border-amber-900 rounded-full px-3 py-1 mb-6">
           <Radio className="w-3.5 h-3.5" />
           Live HVAC Telemetry, Anywhere
@@ -212,11 +259,16 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
             See Live Demo
           </button>
         </div>
+        <div className="mt-12 flex flex-wrap items-center justify-center gap-x-10 gap-y-4 text-sm text-slate-500 dark:text-slate-400">
+          <span className="flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-amber-500" /> 4 detection engines watching every reading</span>
+          <span className="flex items-center gap-2"><Clock className="w-4 h-4 text-amber-500" /> Checked every 5 minutes, day and night</span>
+          <span className="flex items-center gap-2"><MailCheck className="w-4 h-4 text-amber-500" /> Resolved alerts emailed too, so you know it's over</span>
+        </div>
       </section>
 
       {/* Features */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-20">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
           {FEATURES.map(({ icon: Icon, title, description }) => (
             <div key={title} className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm">
               <div className="w-10 h-10 bg-slate-100 dark:bg-slate-800 rounded-lg flex items-center justify-center mb-4">
@@ -226,6 +278,27 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
               <p className="text-sm text-slate-500 dark:text-slate-400">{description}</p>
             </div>
           ))}
+        </div>
+      </section>
+
+      {/* How It Works */}
+      <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-20">
+        <div className="bg-white dark:bg-slate-900 rounded-2xl p-8 sm:p-10 border border-slate-200 dark:border-slate-800 shadow-sm">
+          <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100 text-center mb-10">How it works</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-8">
+            {HOW_IT_WORKS.map(({ icon: Icon, title, description }, index) => (
+              <div key={title} className="text-center">
+                <div className="relative w-12 h-12 mx-auto bg-slate-900 dark:bg-amber-500 rounded-full flex items-center justify-center mb-4">
+                  <Icon className="w-5 h-5 text-white dark:text-slate-900" />
+                  <span className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[11px] font-bold text-slate-500 dark:text-slate-400 flex items-center justify-center">
+                    {index + 1}
+                  </span>
+                </div>
+                <h3 className="font-semibold text-slate-900 dark:text-slate-100 mb-2">{title}</h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400 max-w-xs mx-auto">{description}</p>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 
@@ -285,6 +358,19 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
                     labelStyle={{ color: isDark ? '#94a3b8' : '#64748b', marginBottom: '4px' }}
                     itemStyle={{ color: isDark ? '#e2e8f0' : '#1e293b' }}
                   />
+                  {alertSensor && (
+                    <ReferenceArea y1={alertSensor.safeMax} y2={200} fill="#ef4444" fillOpacity={0.08} ifOverflow="extendDomain" />
+                  )}
+                  {alertSensor && (
+                    <ReferenceLine
+                      y={alertSensor.safeMax}
+                      stroke="#ef4444"
+                      strokeDasharray="6 4"
+                      strokeWidth={1.5}
+                      ifOverflow="extendDomain"
+                      label={{ value: `${alertSensor.name} safe max ${alertSensor.safeMax}°F`, position: 'insideTopRight', fill: '#ef4444', fontSize: 11, fontWeight: 600 }}
+                    />
+                  )}
                   {demoSensors.map((sensor) => (
                     <Area
                       key={sensor.id}
@@ -292,7 +378,9 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
                       dataKey={`sensor${sensor.id}`}
                       name={sensor.name}
                       stroke={sensor.color}
-                      strokeWidth={2.5}
+                      strokeWidth={alertSensor?.id === sensor.id ? 3.5 : 2}
+                      strokeOpacity={alertSensor && alertSensor.id !== sensor.id ? 0.35 : 1}
+                      fillOpacity={alertSensor && alertSensor.id !== sensor.id ? 0.4 : 1}
                       fill={`url(#demo-gradient-${sensor.id})`}
                       dot={false}
                       connectNulls
