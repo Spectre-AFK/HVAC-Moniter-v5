@@ -14,6 +14,8 @@ import LandingPage from './LandingPage';
 import ThemeToggle from './ThemeToggle';
 import logo from './assets/logo.png';
 import { detectAnomalies } from './anomalyDetection';
+import { detectHvacPatterns } from './cycleDetection';
+import { detectRoutineDeviations } from './routineLearning';
 import { useTypewriter } from './useTypewriter';
 
 const COMPANY_NAME = 'Accurate Air Conditioning';
@@ -99,6 +101,11 @@ export default function App() {
   const [sensorNames, setSensorNames] = useState({});
   const [editingSensorKey, setEditingSensorKey] = useState(null);
   const [editingName, setEditingName] = useState('');
+
+  // Logged HVAC setback events (see worker/index.js's cron + src/cycleDetection.js), used to
+  // learn each sensor's usual routine (src/routineLearning.js) — independent of the chart's
+  // selected date range since routine learning needs long history, not just what's on screen.
+  const [hvacEvents, setHvacEvents] = useState([]);
   const sensorNameLabel = (key, sensorIndex) => sensorNames[key]?.trim() || `Sensor ${sensorIndex}`;
   const sensorLabel = (key, deviceId, sensorIndex) =>
     `${sensorNameLabel(key, sensorIndex)} · Device ${shortDeviceId(deviceId)}`;
@@ -186,6 +193,21 @@ export default function App() {
     setSensorNames(map);
   };
 
+  // 90 days of history is plenty for weekday routine learning without the query growing unbounded.
+  const fetchHvacEvents = async () => {
+    const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const { data, error } = await supabase
+      .from('hvac_events')
+      .select('*')
+      .gte('occurred_at', ninetyDaysAgo)
+      .order('occurred_at', { ascending: true });
+    if (error) {
+      console.error('Error fetching HVAC events:', error.message);
+      return;
+    }
+    setHvacEvents(data || []);
+  };
+
   const saveSensorName = async (key, deviceId, sensorIndex) => {
     const trimmed = editingName.trim();
     setEditingSensorKey(null);
@@ -212,6 +234,11 @@ export default function App() {
   useEffect(() => {
     if (!session) return;
     fetchSensorNames();
+    fetchHvacEvents();
+    // New setback events only land every so often (worker cron), so this only needs to be
+    // much less frequent than the live sensor-data poll above.
+    const interval = setInterval(fetchHvacEvents, 5 * 60000);
+    return () => clearInterval(interval);
   }, [session]);
 
   // A changed date range means different anomalies, so any prior AI summary no longer applies —
@@ -265,18 +292,31 @@ export default function App() {
     }
     const chartData = [...byTimestamp.values()].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 
-    const anomalies = detectAnomalies(
-      perSensor.map((s) => ({
-        key: s.key,
-        label: sensorLabel(s.key, s.deviceId, s.sensorIndex),
-        readingsDesc: sensorData
-          .filter((d) => sensorKey(d) === s.key)
-          .map((d) => ({ timestamp: d.timestamp, tempF: convertCtoF(d.temperature_c) })),
-      }))
-    );
+    const perSensorReadings = perSensor.map((s) => ({
+      key: s.key,
+      label: sensorLabel(s.key, s.deviceId, s.sensorIndex),
+      readingsDesc: sensorData
+        .filter((d) => sensorKey(d) === s.key)
+        .map((d) => ({ timestamp: d.timestamp, tempF: convertCtoF(d.temperature_c) })),
+    }));
 
-    return { uniqueSensorKeys, perSensor, chartData, anomalies };
-  }, [sensorData, sensorNames]);
+    const anomalies = detectAnomalies(perSensorReadings);
+    const hvacPatterns = detectHvacPatterns(perSensorReadings);
+
+    // Routine deviations use hvac_events history (logged by the worker cron), not sensorData,
+    // since learning a weekday pattern needs long history rather than just the selected range.
+    const routineFlags = perSensor.flatMap((s) => {
+      const sensorSetbacks = hvacEvents.filter(
+        (e) => e.device_id === s.deviceId && e.sensor_index === s.sensorIndex && e.event_type === 'setback'
+      );
+      return detectRoutineDeviations(sensorSetbacks, sensorLabel(s.key, s.deviceId, s.sensorIndex)).map((f) => ({
+        ...f,
+        key: s.key,
+      }));
+    });
+
+    return { uniqueSensorKeys, perSensor, chartData, anomalies, hvacPatterns: [...hvacPatterns, ...routineFlags] };
+  }, [sensorData, sensorNames, hvacEvents]);
 
   // Infers each sensor's own publish interval from the gaps between its recent readings,
   // rather than assuming a fixed rate shared by every device.
@@ -560,6 +600,7 @@ export default function App() {
               {dashboard.perSensor.map((sensor) => {
                 const isStale = stalenessBySensor[sensor.key]?.isStale;
                 const sensorAnomalies = dashboard.anomalies.filter((f) => f.key === sensor.key);
+                const sensorPatterns = dashboard.hvacPatterns.filter((f) => f.key === sensor.key);
                 return (
                   <div
                     key={sensor.key}
@@ -669,6 +710,21 @@ export default function App() {
                               )
                             ) : (
                               <AlertTriangle className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${flag.severity === 'high' ? 'text-red-500' : 'text-amber-500'}`} />
+                            )}
+                            <span>{flag.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {sensorPatterns.length > 0 && (
+                      <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800 space-y-1.5">
+                        {sensorPatterns.map((flag, i) => (
+                          <div key={i} className="flex items-start gap-1.5 text-xs text-slate-600 dark:text-slate-400">
+                            {flag.type === 'short-cycle' || flag.type === 'routine-deviation' || flag.type === 'routine-missing' ? (
+                              <AlertTriangle className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${flag.severity === 'high' ? 'text-red-500' : 'text-amber-500'}`} />
+                            ) : (
+                              <Activity className="w-3.5 h-3.5 mt-0.5 text-sky-500 shrink-0" />
                             )}
                             <span>{flag.message}</span>
                           </div>

@@ -12,7 +12,7 @@ select
 from pg_class
 join pg_namespace on pg_namespace.oid = pg_class.relnamespace
 where pg_namespace.nspname = 'public'
-  and pg_class.relname in ('sensor_data', 'device_permissions', 'sensor_names', 'alert_rules')
+  and pg_class.relname in ('sensor_data', 'device_permissions', 'sensor_names', 'alert_rules', 'hvac_events')
 order by pg_class.relname;
 
 -- Lists every policy actually attached to those tables, so you can compare against the
@@ -24,7 +24,8 @@ order by pg_class.relname;
 -- 'anon' or 'authenticated': ingestion (node-red/mqtt-bridge) writes with the service_role key,
 -- which bypasses RLS, so sensor_data shouldn't need an anon/authenticated insert policy at all
 -- — one existing anyway would mean anyone holding the (public) anon key could write arbitrary
--- readings directly via the REST API, bypassing MQTT entirely.
+-- readings directly via the REST API, bypassing MQTT entirely. The same logic applies to
+-- `hvac_events`: only worker/index.js's Cron Trigger (service_role key) should ever write to it.
 select
   tablename as table_name,
   policyname,
@@ -34,5 +35,5 @@ select
   with_check as with_check_expression
 from pg_policies
 where schemaname = 'public'
-  and tablename in ('sensor_data', 'device_permissions', 'sensor_names', 'alert_rules')
+  and tablename in ('sensor_data', 'device_permissions', 'sensor_names', 'alert_rules', 'hvac_events')
 order by tablename, cmd, policyname;

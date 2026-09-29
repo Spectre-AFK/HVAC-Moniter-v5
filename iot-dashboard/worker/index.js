@@ -1,7 +1,11 @@
 // Cloudflare Worker: serves the built SPA, a small API for AI-generated natural-language
 // summaries of anomalies already flagged by plain statistics on the client (see
-// src/anomalyDetection.js), and a Cron Trigger that emails users when a sensor crosses a
-// threshold they set in the Alerts panel (see src/AlertSettings.jsx).
+// src/anomalyDetection.js), a Cron Trigger that emails users when a sensor crosses a
+// threshold they set in the Alerts panel (see src/AlertSettings.jsx), and a second Cron
+// Trigger job that logs HVAC setback events (see src/cycleDetection.js) to `hvac_events` so
+// src/routineLearning.js can learn each sensor's usual routine over time.
+
+import { detectHvacPatterns } from '../src/cycleDetection.js';
 
 const MAX_FLAGS = 50;
 // llama-3.1-8b-instruct (non "-fast") was deprecated 2026-05-30; this variant is current.
@@ -54,6 +58,7 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil(checkAlertRules(env));
+    ctx.waitUntil(detectAndLogHvacEvents(env));
   },
 };
 
@@ -227,6 +232,91 @@ function supabaseAdminHeaders(env) {
   };
 }
 
+// Runs on the same schedule as checkAlertRules: re-runs cycleDetection.js's setback detector
+// server-side (once, centrally, with the service role key) and logs any new "someone lowered
+// the setpoint" event to `hvac_events`, so routineLearning.js has history to learn from.
+// Detection itself already happens for free on the client (see App.jsx's dashboard useMemo) —
+// this is purely about persisting one durable record per event, not duplicating that logic's
+// job of deciding what counts as a setback.
+async function detectAndLogHvacEvents(env) {
+  if (!env.SUPABASE_SERVICE_ROLE_KEY) {
+    console.error('SUPABASE_SERVICE_ROLE_KEY is not set; skipping HVAC event detection.');
+    return;
+  }
+
+  // Recent rows are enough to discover which sensors are currently active; each sensor's own
+  // detection window is fetched separately below since 500 rows shared across many sensors
+  // wouldn't cover any single one's last ~33 hours of readings.
+  const recentRes = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/sensor_data?select=device_id,sensor_index&order=timestamp.desc&limit=500`,
+    { headers: supabaseAdminHeaders(env) }
+  );
+  if (!recentRes.ok) {
+    console.error('Failed to list recent sensor_data for HVAC event detection:', await recentRes.text());
+    return;
+  }
+
+  const recentRows = await recentRes.json();
+  const sensorKeys = [...new Set(recentRows.map((r) => `${r.device_id}::${r.sensor_index}`))];
+
+  for (const sensorKeyStr of sensorKeys) {
+    const [deviceId, sensorIndexStr] = sensorKeyStr.split('::');
+    try {
+      await detectAndLogHvacEventsForSensor(deviceId, Number(sensorIndexStr), env);
+    } catch (err) {
+      console.error(`Failed to detect HVAC events for ${sensorKeyStr}:`, err);
+    }
+  }
+}
+
+async function detectAndLogHvacEventsForSensor(deviceId, sensorIndex, env) {
+  const dataRes = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/sensor_data?device_id=eq.${encodeURIComponent(deviceId)}` +
+      `&sensor_index=eq.${sensorIndex}&order=timestamp.desc&limit=200&select=temperature_c,timestamp`,
+    { headers: supabaseAdminHeaders(env) }
+  );
+  if (!dataRes.ok) {
+    console.error(`Failed to fetch readings for ${deviceId}/${sensorIndex}:`, await dataRes.text());
+    return;
+  }
+
+  const rows = await dataRes.json();
+  const readingsDesc = rows.map((r) => ({ timestamp: r.timestamp, tempF: (r.temperature_c * 9) / 5 + 32 }));
+  const patterns = detectHvacPatterns([{ key: sensorKeyStr(deviceId, sensorIndex), label: '', readingsDesc }]);
+
+  for (const flag of patterns) {
+    if (flag.type !== 'setback') continue; // short-cycle is transient hardware state, not a routine data point worth logging long-term
+
+    // Upsert-and-ignore on the natural dedup key: the same setback stays inside the ~33-hour
+    // detection window across many cron ticks, so without this every tick would re-insert it.
+    const insertRes = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/hvac_events?on_conflict=device_id,sensor_index,event_type,occurred_at`,
+      {
+        method: 'POST',
+        headers: {
+          ...supabaseAdminHeaders(env),
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=ignore-duplicates,return=minimal',
+        },
+        body: JSON.stringify({
+          device_id: deviceId,
+          sensor_index: sensorIndex,
+          event_type: 'setback',
+          occurred_at: flag.occurredAt,
+          amplitude_f: flag.amplitudeF,
+          duration_minutes: flag.durationMinutes,
+          typical_amplitude_f: flag.typicalAmplitudeF,
+        }),
+      }
+    );
+    if (!insertRes.ok) console.error(`Failed to log HVAC event for ${deviceId}/${sensorIndex}:`, await insertRes.text());
+  }
+}
+
+function sensorKeyStr(deviceId, sensorIndex) {
+  return `${deviceId}_${sensorIndex}`;
+}
+
 // Runs on a schedule (see wrangler.jsonc "triggers"): checks every enabled alert_rules row
 // against that sensor's latest reading and emails the rule's owner when a threshold is crossed.
 async function checkAlertRules(env) {
@@ -273,11 +363,13 @@ async function evaluateRule(rule, env) {
   const isBreached = breachedHigh || breachedLow;
 
   if (isBreached && !rule.is_triggered) {
-    await sendAlertEmail(rule, { tempF, direction: breachedHigh ? 'above' : 'below' }, env);
-    await updateRuleState(rule.id, { is_triggered: true, last_notified_at: new Date().toISOString() }, env);
+    // Only flip is_triggered once the email actually sends, so a failed send gets retried
+    // next cron tick instead of being silently recorded as "already notified".
+    const sent = await sendAlertEmail(rule, { tempF, direction: breachedHigh ? 'above' : 'below' }, env);
+    if (sent) await updateRuleState(rule.id, { is_triggered: true, last_notified_at: new Date().toISOString() }, env);
   } else if (!isBreached && rule.is_triggered) {
-    await sendAlertEmail(rule, { tempF, direction: 'cleared' }, env);
-    await updateRuleState(rule.id, { is_triggered: false, last_notified_at: new Date().toISOString() }, env);
+    const sent = await sendAlertEmail(rule, { tempF, direction: 'cleared' }, env);
+    if (sent) await updateRuleState(rule.id, { is_triggered: false, last_notified_at: new Date().toISOString() }, env);
   }
 }
 
@@ -329,13 +421,13 @@ async function fetchWithRetry(url, options, retries = 1, delayMs = 1000) {
 async function sendAlertEmail(rule, { tempF, direction }, env) {
   if (!env.RESEND_API_KEY || !env.ALERT_FROM_EMAIL) {
     console.error('RESEND_API_KEY or ALERT_FROM_EMAIL is not set; skipping alert email.');
-    return;
+    return false;
   }
 
   const email = await getUserEmail(rule.user_id, env);
   if (!email) {
     console.error(`No email found for user ${rule.user_id}; skipping alert.`);
-    return;
+    return false;
   }
 
   const sensorLabel = await getSensorLabel(rule.device_id, rule.sensor_index, env);
@@ -373,14 +465,25 @@ async function sendAlertEmail(rule, { tempF, direction }, env) {
       </p>
     </div>`;
 
-  const res = await fetchWithRetry('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ from: env.ALERT_FROM_EMAIL, to: email, subject, text, html }),
-  });
-  if (!res.ok) console.error('Failed to send alert email:', await res.text());
+  try {
+    const res = await fetchWithRetry('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ from: env.ALERT_FROM_EMAIL, to: email, subject, text, html }),
+    });
+    const responseBody = await res.text();
+    if (!res.ok) {
+      console.error('Failed to send alert email:', responseBody);
+      return false;
+    }
+    console.log(`Alert email accepted by Resend for ${email}:`, responseBody);
+    return true;
+  } catch (err) {
+    console.error('Failed to send alert email:', err);
+    return false;
+  }
 }
 

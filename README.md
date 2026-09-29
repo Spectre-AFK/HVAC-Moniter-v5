@@ -228,6 +228,49 @@ When any anomalies are found, the dashboard shows them in an "Anomalies Detected
 
 To enable it, your Cloudflare account needs [Workers AI](https://developers.cloudflare.com/workers-ai/) access (available on the free tier with usage limits).
 
+## HVAC Cycle Detection & Routine Learning
+
+[src/cycleDetection.js](src/cycleDetection.js) runs a second set of plain-statistics checks, client-side and free, that read the temperature series as a compressor on/off signal rather than just looking for outliers:
+
+- **Cycle info** — the sensor's current on/off cadence (e.g. "cycling every ~42 min, running ~55% of that time"), found via peak/trough (zig-zag) detection on the temperature curve.
+- **Short-cycling** — the full on/off cycle is unusually fast (averaging under ~12 min), a sign of a hardware problem (failing capacitor, low refrigerant, oversized unit) rather than normal operation.
+- **Setback** — a sustained temperature drop much bigger than that sensor's own typical cooling-cycle swing, e.g. someone getting home and lowering the setpoint, distinguished from routine cycling by comparing against the median amplitude of its recent cooling cycles.
+
+Every 5 minutes, the same Cron Trigger that checks alert rules (see [worker/index.js](worker/index.js) `scheduled` handler) also re-runs the setback detector server-side, once, with the service role key, and logs any new setback event to `hvac_events` — this is purely to build durable history for routine learning below; it doesn't change what the client already shows for free.
+
+[src/routineLearning.js](src/routineLearning.js) then learns each sensor's usual setback time per weekday from that history (median + median-absolute-deviation, at least 4 past occurrences before a weekday counts as "learned") and flags:
+
+- **Routine established** — today's setback happened close to the usual time for this weekday.
+- **Routine deviation** — today's setback happened well earlier or later than usual.
+- **Routine missing** — well past the usual time for this weekday, with no setback detected yet today.
+
+This is still plain statistics (median/MAD time-of-day clustering), not a trained model — kept that way deliberately so it stays free, deterministic, and easy to reason about. If a genuine ML model is added later (e.g. to predict *when* you'll get home rather than just learn the median), it would slot in alongside this rather than replace it.
+
+Create the table and lock it down with RLS. Only the Worker's service role key writes to it (see the ingestion note in [supabase/verify_rls.sql](../supabase/verify_rls.sql) for why there's deliberately no anon/authenticated insert policy):
+
+```sql
+create table if not exists public.hvac_events (
+  id uuid primary key default gen_random_uuid(),
+  device_id text not null,
+  sensor_index int not null,
+  event_type text not null check (event_type in ('setback')),
+  occurred_at timestamptz not null,
+  amplitude_f numeric,
+  duration_minutes numeric,
+  typical_amplitude_f numeric,
+  created_at timestamptz not null default now(),
+  unique (device_id, sensor_index, event_type, occurred_at)
+);
+
+alter table public.hvac_events enable row level security;
+
+create policy "hvac_events_select"
+on public.hvac_events
+for select
+to authenticated
+using (true);
+```
+
 ## Sensor Alerts
 
 Any signed-in user can open the bell icon in the nav to set a high and/or low °F threshold per sensor they can see (via [src/AlertSettings.jsx](src/AlertSettings.jsx)). A Cloudflare Worker Cron Trigger ([worker/index.js](worker/index.js) `scheduled` handler) runs every 5 minutes, compares each enabled rule against that sensor's latest reading, and emails the rule's owner once when a threshold is crossed and once more when the reading returns to normal — it won't re-email on every check while still breached.
@@ -303,6 +346,10 @@ iot-dashboard/
 │   ├── App.jsx         # Main dashboard UI, auth, and data-fetching logic
 │   ├── anomalyDetection.js # Plain-statistics anomaly checks (z-score, trend, flatline)
 │   ├── anomalyDetection.test.js # Vitest unit tests for the checks above
+│   ├── cycleDetection.js # HVAC on/off cycle detection (duty cycle, short-cycling, setback events)
+│   ├── cycleDetection.test.js # Vitest unit tests for the checks above
+│   ├── routineLearning.js # Learns each sensor's usual setback time per weekday from hvac_events
+│   ├── routineLearning.test.js # Vitest unit tests for the checks above
 │   ├── LandingPage.jsx # Public marketing page with a simulated live demo
 │   ├── AdminPanel.jsx  # Admin-only device access management
 │   ├── ThemeToggle.jsx # Light/dark mode toggle button
