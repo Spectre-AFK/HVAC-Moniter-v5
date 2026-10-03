@@ -4,7 +4,7 @@
         "type": "tab",
         "label": "v2",
         "disabled": false,
-        "info": "Production MQTT -> Supabase ingestion, running on the same Pi as the MQTT broker.\n\nSee ../README.md for the fixes applied here vs. the original export:\n- \"Format for Supabase\" now validates the payload shape before mapping, instead of throwing\n  (and silently dropping the message) on a malformed/unexpected MQTT payload.\n- The HTTP response is now checked; failed inserts are logged via node.error() instead of\n  disappearing into an unwired output.\n- Configure a username/password on the \"Local Pi Broker\" node (Security tab) once the ESP32\n  firmware's MQTT_USERNAME/MQTT_PASSWORD are set (see ../esp32 code/config.h) \u2014 an\n  unauthenticated broker lets anything on the LAN publish or read sensor data.\n\n\"Push to Supabase\" authenticates with the service_role key, which bypasses RLS \u2014 correct for\na trusted backend process like this one. Never put that key anywhere it could reach a browser.",
+        "info": "MQTT -> Supabase ingestion. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the Node-RED process environment. Payload validation is generated from shared/readingPayload.js; regenerate with node scripts/sync-node-red.mjs. Configure broker credentials in the MQTT broker node Security tab. Writes are best-effort, not durably queued.",
         "env": []
     },
     {
@@ -12,7 +12,7 @@
         "type": "function",
         "z": "7b42637342905f3d",
         "name": "Format for Supabase",
-        "func": "const payload = msg.payload;\n\n// Defend against malformed/unexpected MQTT payloads instead of throwing and losing the message.\nif (!payload || !Array.isArray(payload.temperatures) || typeof payload.device_id !== 'string') {\n    node.warn(`Ignoring malformed MQTT payload: ${JSON.stringify(payload)}`);\n    return null;\n}\n\n// Firmware sends an NTP-synced epoch-seconds timestamp; fall back to \"now\" if it's ever missing\nconst timestamp = Number.isFinite(payload.timestamp)\n    ? new Date(payload.timestamp * 1000).toISOString()\n    : new Date().toISOString();\n\nconst rows = payload.temperatures\n    .map((temperature_c, sensor_index) => ({\n        sensor_index,\n        temperature_c,\n        timestamp,\n        device_id: payload.device_id\n    }))\n    // Disconnected probes are published as `null` (or any other non-number) — drop them\n    // instead of inserting bogus rows.\n    .filter(row => typeof row.temperature_c === 'number' && Number.isFinite(row.temperature_c));\n\nif (rows.length === 0) return null;\n\nmsg.payload = rows;\nreturn msg;",
+        "func": "const MAX_PAYLOAD_BYTES = 16_384;\r\n\r\nfunction parseReadingRows(rawPayload, now = Date.now()) {\r\n  if (typeof rawPayload !== 'string' || Buffer.byteLength(rawPayload, 'utf8') > MAX_PAYLOAD_BYTES) {\r\n    throw new TypeError('MQTT payload must be a string of at most 16 KiB.');\r\n  }\r\n  const msg = JSON.parse(rawPayload);\r\n  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {\r\n    throw new TypeError('MQTT payload must be an object.');\r\n  }\r\n  const { device_id, timestamp, temperatures } = msg;\r\n  if (typeof device_id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(device_id)) {\r\n    throw new TypeError('device_id must contain 1-128 letters, numbers, underscores or hyphens.');\r\n  }\r\n  const milliseconds = timestamp * 1000;\r\n  if (!Number.isFinite(timestamp) || timestamp < 946684800 ||\r\n      !Number.isFinite(milliseconds) || milliseconds > now + 300_000) {\r\n    throw new TypeError('timestamp must be epoch seconds from a synchronized clock, not in the future.');\r\n  }\r\n  if (!Array.isArray(temperatures) || temperatures.length === 0 || temperatures.length > 64) {\r\n    throw new TypeError('temperatures must contain 1-64 probe positions.');\r\n  }\r\n  const isoTimestamp = new Date(milliseconds).toISOString();\r\n  const rows = [];\r\n  temperatures.forEach((temperature_c, sensor_index) => {\r\n    if (temperature_c === null) return;\r\n    if (!Number.isFinite(temperature_c) || temperature_c < -55 || temperature_c > 125) {\r\n      throw new TypeError(`Invalid DS18B20 temperature at probe ${sensor_index}.`);\r\n    }\r\n    rows.push({ device_id, sensor_index, temperature_c, timestamp: isoTimestamp });\r\n  });\r\n  return rows;\r\n}\r\n\ntry {\n    const rows = parseReadingRows(JSON.stringify(msg.payload));\n    if (rows.length === 0) return null;\n    const baseUrl = env.get('SUPABASE_URL');\n    const key = env.get('SUPABASE_SERVICE_ROLE_KEY');\n    if (!baseUrl || !key) throw new Error('Missing Supabase ingestion environment variables.');\n    msg.url = baseUrl.replace(/\\/$/, '') + '/rest/v1/sensor_data';\n    msg.headers = {\n        apikey: key,\n        Authorization: 'Bearer ' + key,\n        'Content-Type': 'application/json',\n        Prefer: 'return=minimal'\n    };\n    msg.payload = rows;\n    return msg;\n} catch (error) {\n    node.error('MQTT ingestion rejected: ' + error.message, msg);\n    return null;\n}",
         "outputs": 1,
         "timeout": "",
         "noerr": 0,
@@ -36,33 +36,14 @@
         "method": "POST",
         "ret": "txt",
         "paytoqs": "ignore",
-        "url": "https://swbcwtrijguodjaxyitm.supabase.co/rest/v1/sensor_data",
+        "url": "",
         "tls": "",
         "persist": false,
         "proxy": "",
         "insecureHTTPParser": false,
         "authType": "",
         "senderr": true,
-        "headers": [
-            {
-                "keyType": "other",
-                "keyValue": "apikey",
-                "valueType": "other",
-                "valueValue": ""
-            },
-            {
-                "keyType": "other",
-                "keyValue": "Authorization",
-                "valueType": "other",
-                "valueValue": "Bearer"
-            },
-            {
-                "keyType": "other",
-                "keyValue": "Content-Type",
-                "valueType": "other",
-                "valueValue": "application/json"
-            }
-        ],
+        "headers": [],
         "x": 1010,
         "y": 440,
         "wires": [
@@ -76,7 +57,7 @@
         "type": "function",
         "z": "7b42637342905f3d",
         "name": "Handle Supabase Response",
-        "func": "if (msg.statusCode >= 400) {\n    node.error(`Supabase insert failed (${msg.statusCode}): ${msg.payload}`, msg);\n    node.status({ fill: 'red', shape: 'dot', text: `HTTP ${msg.statusCode} @ ${new Date().toLocaleTimeString()}` });\n} else {\n    node.status({ fill: 'green', shape: 'dot', text: `ok @ ${new Date().toLocaleTimeString()}` });\n}\nreturn null;",
+        "func": "if (!Number.isInteger(msg.statusCode) || msg.statusCode < 200 || msg.statusCode >= 300) {\n    node.error('Supabase insert failed (' + (msg.statusCode ?? 'no HTTP response') + '): ' + msg.payload,\n        { _msgid: msg._msgid, statusCode: msg.statusCode });\n    node.status({ fill: 'red', shape: 'dot', text: 'Write failed @ ' + new Date().toLocaleTimeString() });\n} else {\n    node.status({ fill: 'green', shape: 'dot', text: 'ok @ ' + new Date().toLocaleTimeString() });\n}\nreturn null;",
         "outputs": 0,
         "timeout": "",
         "noerr": 0,

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { UserPlus, Trash2, ShieldAlert, CheckCircle2, Loader2, Search, X } from 'lucide-react';
+import { fetchPagedRows } from './history';
 
 // Admin-only screen for managing which users can view which sensors.
 // Client-side admin gating is UX only — the real enforcement must live in
@@ -16,6 +17,8 @@ export default function AdminPanel({ supabase, sensors, accessToken }) {
   const [selectedUser, setSelectedUser] = useState(null); // { id, email }
   const [userResults, setUserResults] = useState([]);
   const [isSearchingUsers, setIsSearchingUsers] = useState(false);
+  const [searchMessage, setSearchMessage] = useState('');
+  const [activeResult, setActiveResult] = useState(-1);
   const [isGranting, setIsGranting] = useState(false);
 
   const [revokingId, setRevokingId] = useState(null);
@@ -33,73 +36,97 @@ export default function AdminPanel({ supabase, sensors, accessToken }) {
   );
 
   const resolveEmails = useCallback(
-    async (userIds) => {
-      const missing = [...new Set(userIds)].filter((id) => !(id in userEmails));
+    async (userIds, signal) => {
+      const missing = [...new Set(userIds)];
       if (missing.length === 0) return;
       try {
-        const res = await fetch(`/api/admin/users?ids=${encodeURIComponent(missing.join(','))}`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
-        if (!res.ok) throw new Error(`Lookup failed (${res.status})`);
-        const data = await res.json();
-        const found = new Map((data.users || []).map((u) => [u.id, u.email]));
+        const found = new Map();
+        for (let offset = 0; offset < missing.length; offset += 50) {
+          const res = await fetch(`/api/admin/users?ids=${encodeURIComponent(missing.slice(offset, offset + 50).join(','))}`, {
+            signal,
+            headers: { Authorization: `Bearer ${accessToken}` },
+          });
+          if (!res.ok) throw new Error(`Lookup failed (${res.status})`);
+          const data = await res.json();
+          for (const user of data.users) found.set(user.id, user.email);
+        }
+        if (signal?.aborted) return;
         setUserEmails((prev) => {
           const next = { ...prev };
           for (const id of missing) next[id] = found.get(id) ?? null;
           return next;
         });
       } catch (error) {
+        if (signal?.aborted) return;
         console.error('Failed to resolve user emails:', error.message);
+        setFeedback({ type: 'error', text: `Could not resolve user emails: ${error.message}` });
       }
     },
-    [accessToken, userEmails]
+    [accessToken]
   );
 
-  const fetchPermissions = useCallback(async () => {
+  const fetchPermissions = useCallback(async (signal) => {
     setIsLoadingList(true);
-    const { data, error } = await supabase
-      .from('device_permissions')
-      .select('*');
-
-    if (error) {
+    try {
+      const { rows, limitReached } = await fetchPagedRows(() => supabase.from('device_permissions').select('*').order('id'), { signal });
+      if (limitReached) throw new Error('Maximum of 10,000 permission rows reached.');
+      if (signal?.aborted) return;
+      setPermissions(rows);
+      await resolveEmails(rows.map((p) => p.user_id), signal);
+    } catch (error) {
+      if (signal?.aborted) return;
       console.error('Failed to load permissions:', error.message);
       setFeedback({ type: 'error', text: `Failed to load permissions: ${error.message}` });
-    } else {
-      setPermissions(data || []);
-      await resolveEmails((data || []).map((p) => p.user_id));
+    } finally {
+      if (!signal?.aborted) setIsLoadingList(false);
     }
-    setIsLoadingList(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [supabase]);
+  }, [supabase, resolveEmails]);
 
   useEffect(() => {
-    fetchPermissions();
+    const controller = new AbortController();
+    fetchPermissions(controller.signal);
+    return () => controller.abort();
   }, [fetchPermissions]);
 
   // Debounced email search as the admin types in the "Add user" field.
   useEffect(() => {
     if (userQuery.trim().length < 2 || selectedUser?.email === userQuery) {
       setUserResults([]);
+      setIsSearchingUsers(false);
+      setSearchMessage('');
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
     setIsSearchingUsers(true);
+    setSearchMessage('');
+    setActiveResult(-1);
     const timer = setTimeout(async () => {
       try {
         const res = await fetch(`/api/admin/users?query=${encodeURIComponent(userQuery.trim())}`, {
+          signal: controller.signal,
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         if (!res.ok) throw new Error(`Search failed (${res.status})`);
         const data = await res.json();
-        if (!cancelled) setUserResults(data.users || []);
+        if (!cancelled) {
+          setUserResults(data.users || []);
+          setSearchMessage(data.truncated ? 'Search scanned the first 10,000 users. Results may be incomplete.'
+            : data.users.length === 0 ? 'No matching users.' : '');
+        }
       } catch (error) {
-        if (!cancelled) console.error('User search failed:', error.message);
+        if (!cancelled) {
+          console.error('User search failed:', error.message);
+          setUserResults([]);
+          setSearchMessage(`User search failed: ${error.message}`);
+        }
       } finally {
         if (!cancelled) setIsSearchingUsers(false);
       }
     }, 300);
     return () => {
       cancelled = true;
+      controller.abort();
       clearTimeout(timer);
     };
   }, [userQuery, selectedUser, accessToken]);
@@ -108,6 +135,8 @@ export default function AdminPanel({ supabase, sensors, accessToken }) {
     setSelectedUser(user);
     setUserQuery(user.email || user.id);
     setUserResults([]);
+    setActiveResult(-1);
+    setSearchMessage('');
     setUserEmails((prev) => (user.id in prev ? prev : { ...prev, [user.id]: user.email }));
   };
 
@@ -165,19 +194,17 @@ export default function AdminPanel({ supabase, sensors, accessToken }) {
 
     setRevokingId(permission.id);
     setFeedback(null);
-    const { error } = await supabase
-      .from('device_permissions')
-      .delete()
-      .eq('id', permission.id);
-
-    if (error) {
-      console.error('Failed to revoke access:', error.message);
-      setFeedback({ type: 'error', text: `Failed to revoke access: ${error.message}` });
-    } else {
+    try {
+      const { error } = await supabase.from('device_permissions').delete().eq('id', permission.id);
+      if (error) throw error;
       setPermissions((prev) => prev.filter((p) => p.id !== permission.id));
       setFeedback({ type: 'success', text: `Revoked ${email}'s access to ${label}.` });
+    } catch (error) {
+      console.error('Failed to revoke access:', error.message);
+      setFeedback({ type: 'error', text: `Failed to revoke access: ${error.message}` });
+    } finally {
+      setRevokingId(null);
     }
-    setRevokingId(null);
   };
 
   // Group flat permission rows by user so an admin can scan "who has access to what" at a glance.
@@ -205,6 +232,7 @@ export default function AdminPanel({ supabase, sensors, accessToken }) {
 
       {feedback && (
         <div
+          role={feedback.type === 'error' ? 'alert' : 'status'}
           className={`flex items-center gap-2 p-3 rounded-lg text-sm ${
             feedback.type === 'success'
               ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-900'
@@ -221,10 +249,16 @@ export default function AdminPanel({ supabase, sensors, accessToken }) {
         <h3 className="font-semibold text-slate-900 dark:text-slate-100 mb-4">Grant Access</h3>
         <form onSubmit={handleGrant} className="flex flex-col sm:flex-row gap-4 sm:items-end">
           <div className="flex-1 relative">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">User</label>
+            <label htmlFor="grant-user" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">User</label>
             <div className="relative">
               <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
               <input
+                id="grant-user"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-expanded={userResults.length > 0 && !selectedUser}
+                aria-controls="grant-user-results"
+                aria-activedescendant={activeResult >= 0 && userResults[activeResult] ? `grant-result-${userResults[activeResult].id}` : undefined}
                 type="text"
                 value={userQuery}
                 onChange={(e) => {
@@ -234,6 +268,21 @@ export default function AdminPanel({ supabase, sensors, accessToken }) {
                 placeholder="Search by email..."
                 className="w-full pl-9 pr-8 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all text-sm"
                 autoComplete="off"
+                onKeyDown={(event) => {
+                  if (event.key === 'ArrowDown' && userResults.length) {
+                    event.preventDefault();
+                    setActiveResult((index) => Math.min(index + 1, userResults.length - 1));
+                  } else if (event.key === 'ArrowUp' && userResults.length) {
+                    event.preventDefault();
+                    setActiveResult((index) => Math.max(index - 1, 0));
+                  } else if (event.key === 'Enter' && userResults.length && !selectedUser) {
+                    event.preventDefault();
+                    if (activeResult >= 0) pickUser(userResults[activeResult]);
+                  } else if (event.key === 'Escape') {
+                    setUserResults([]);
+                    setActiveResult(-1);
+                  }
+                }}
               />
               {userQuery && (
                 <button
@@ -247,7 +296,7 @@ export default function AdminPanel({ supabase, sensors, accessToken }) {
               )}
             </div>
             {(isSearchingUsers || userResults.length > 0) && !selectedUser && (
-              <div className="absolute z-10 mt-1 w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+              <div id="grant-user-results" role="listbox" aria-label="Matching users" className="absolute z-10 mt-1 w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg shadow-lg max-h-48 overflow-y-auto">
                 {isSearchingUsers ? (
                   <div className="px-3 py-2 text-sm text-slate-500 dark:text-slate-400 flex items-center gap-2">
                     <Loader2 className="w-3.5 h-3.5 animate-spin" /> Searching...
@@ -256,6 +305,9 @@ export default function AdminPanel({ supabase, sensors, accessToken }) {
                   userResults.map((u) => (
                     <button
                       key={u.id}
+                      id={`grant-result-${u.id}`}
+                      role="option"
+                      aria-selected={userResults[activeResult]?.id === u.id}
                       type="button"
                       onClick={() => pickUser(u)}
                       className="block w-full text-left px-3 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700"
@@ -268,8 +320,10 @@ export default function AdminPanel({ supabase, sensors, accessToken }) {
             )}
           </div>
           <div className="flex-1">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Sensor</label>
+            {searchMessage && <p role="status" className="mt-2 text-sm text-slate-600 dark:text-slate-300">{searchMessage}</p>}
+            <label htmlFor="grant-sensor" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Sensor</label>
             <select
+              id="grant-sensor"
               value={selectedSensorKey}
               onChange={(e) => setSelectedSensorKey(e.target.value)}
               className="w-full px-4 py-2 border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all text-sm"
@@ -338,4 +392,3 @@ export default function AdminPanel({ supabase, sensors, accessToken }) {
     </div>
   );
 }
-

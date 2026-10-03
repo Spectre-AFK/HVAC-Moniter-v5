@@ -42,8 +42,12 @@ or read every sensor's data. Configure your broker (e.g. Mosquitto) to require a
 
 ## Behavior
 
-- Reconnects automatically (both to MQTT and implicitly on the next message if a Supabase
-  write fails — failures are logged, not queued/retried).
+- Reconnects automatically to MQTT. Database writes time out after 15 seconds; a failed
+  write is logged as a failure and never followed by a "Wrote" success message.
+  Failed readings are not queued or automatically retried.
 - Skips `null` entries in a payload's `temperatures` array (a disconnected probe) rather than
   writing a bad reading.
-- Ignores malformed/non-JSON payloads with a warning instead of crashing.
+- Rejects malformed/non-JSON payloads with an error instead of crashing. Uses
+  [the shared validation contract](../shared/readingPayload.js), also generated into Node-RED.
+  Epoch timestamps must be from a synchronized clock and no more than five minutes ahead.
+  Invalid timestamps are never replaced by the bridge's current time.

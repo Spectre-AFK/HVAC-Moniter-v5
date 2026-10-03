@@ -1,12 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea
-} from 'recharts';
+import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Thermometer, Activity, BellRing, Radio, Phone, Mail, ArrowRight, AlertTriangle, Users,
   TrendingUp, Repeat, Clock, Cpu, MailCheck, ShieldCheck
 } from 'lucide-react';
 import ThemeToggle from './ThemeToggle';
+const DemoChart = lazy(() => import('./DemoChart'));
 
 // Simulated sensors for the marketing demo — no real data, no login required.
 // Each scenario swaps in different sensor readings so visitors can see what the dashboard
@@ -37,7 +35,7 @@ const SCENARIOS = [
       title: 'Example: 1 Sensor Needs Attention',
       affectedSensorId: 2,
       message: '"Walk-in Cooler" has been trending warmer over the last hour — often a sign a door was left open. ' +
-        'You\'d get an email the moment it crosses your safe range.',
+        'With a configured threshold alert, you\'d get an email after the next five-minute check.',
     },
   },
   {
@@ -59,6 +57,16 @@ const SCENARIOS = [
 ];
 
 const HISTORY_LENGTH = 20;
+function demoValues(sensors, tick) {
+  const values = {};
+  for (const sensor of sensors) {
+    const wave = Math.sin((tick + sensor.id * 3) / 4) * sensor.amplitude;
+    const jitter = Math.sin(tick * 2.37 + sensor.id) * (sensor.jitter ?? 0.6) / 2;
+    const drift = sensor.drift ? Math.min(sensor.drift * tick, sensor.driftCap ?? Infinity) : 0;
+    values[sensor.id] = sensor.base + wave + jitter + drift;
+  }
+  return values;
+}
 
 // Status is relative to each sensor's own safe range, not one universal hot/cold split —
 // a cooler that's crept up to 58°F is just as "out of range" as a rooftop unit at 95°F.
@@ -85,7 +93,7 @@ const FEATURES = [
   {
     icon: BellRing,
     title: 'Smart Threshold Alerts',
-    description: 'Set a safe high/low range per sensor and get an email the instant it\'s crossed — then another the moment it\'s back to normal.',
+    description: 'Set a safe high/low range per sensor. Fresh readings are checked every five minutes, with breach and recovery emails.',
   },
   {
     icon: TrendingUp,
@@ -94,8 +102,8 @@ const FEATURES = [
   },
   {
     icon: Repeat,
-    title: 'Short-Cycle Detection',
-    description: 'Watches every compressor on/off cycle and flags short-cycling early, often the first sign of a failing capacitor or low refrigerant.',
+    title: 'Temperature Cycle Insights',
+    description: 'Estimates cycling patterns from temperature changes. Assessing rapid cycles requires sufficiently frequent samples and equipment verification.',
   },
   {
     icon: Clock,
@@ -118,12 +126,12 @@ const HOW_IT_WORKS = [
   {
     icon: ShieldCheck,
     title: 'Four checks run automatically',
-    description: 'Thresholds, statistical anomalies, short-cycling, and routine learning all watch every reading — no setup required.',
+    description: 'The dashboard analyzes trends and sampled cycles. Configure thresholds for emails; routine learning needs historical events.',
   },
   {
     icon: MailCheck,
     title: 'You get an email',
-    description: 'The moment something needs attention, and a follow-up the moment it\'s resolved.',
+    description: 'Configured temperature thresholds are checked every five minutes, with a follow-up when fresh readings return to range.',
   },
 ];
 
@@ -159,7 +167,9 @@ function DemoSensorCard({ sensor, value }) {
 
 export default function LandingPage({ onSignIn, companyName, companyPhone, companyPhoneHref, companyEmail, logo, isDark, onToggleTheme }) {
   const [tick, setTick] = useState(0);
-  const [history, setHistory] = useState([]);
+  const [startedAt, setStartedAt] = useState(() => Date.now());
+  const [loadChart, setLoadChart] = useState(false);
+  const chartRef = useRef(null);
   const [scenarioKey, setScenarioKey] = useState(SCENARIOS[0].key);
   const scenario = SCENARIOS.find((s) => s.key === scenarioKey) ?? SCENARIOS[0];
   const demoSensors = scenario.sensors;
@@ -170,38 +180,33 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
     return () => clearInterval(interval);
   }, []);
 
-  // Starts each scenario's chart fresh instead of jumping mid-line from the previous one
   useEffect(() => {
-    setHistory([]);
-  }, [scenarioKey]);
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        setLoadChart(true);
+        observer.disconnect();
+      }
+    }, { rootMargin: '400px' });
+    observer.observe(chartRef.current);
+    return () => observer.disconnect();
+  }, []);
 
-  const liveValues = useMemo(() => {
+  const liveValues = demoValues(demoSensors, tick);
+  const history = useMemo(() => Array.from({ length: Math.min(tick + 1, HISTORY_LENGTH) }, (_, i) => {
+    const sampleTick = Math.max(0, tick - HISTORY_LENGTH + 1) + i;
     const values = {};
+    const sampleValues = demoValues(demoSensors, sampleTick);
     for (const sensor of demoSensors) {
-      const wave = Math.sin((tick + sensor.id * 3) / 4) * sensor.amplitude;
-      const jitter = (Math.random() - 0.5) * (sensor.jitter ?? 0.6);
-      // Drift creeps upward with time but is capped so a long-open tab doesn't run away forever.
-      const drift = sensor.drift ? Math.min(sensor.drift * tick, sensor.driftCap ?? Infinity) : 0;
-      values[sensor.id] = sensor.base + wave + jitter + drift;
+      values[`sensor${sensor.id}`] = Number(sampleValues[sensor.id].toFixed(1));
     }
-    return values;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick, scenarioKey]);
+    return { time: new Date(startedAt + sampleTick * 2000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), ...values };
+  }), [tick, demoSensors, startedAt]);
 
   // The sensor called out in the active scenario's alert, used to highlight its line and
   // draw its safe-range threshold on the chart so the breach is visible, not just implied.
   const alertSensor = scenario.alert
     ? demoSensors.find((s) => s.id === scenario.alert.affectedSensorId)
     : null;
-
-  useEffect(() => {
-    const point = { time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
-    for (const sensor of demoSensors) {
-      point[`sensor${sensor.id}`] = Number(liveValues[sensor.id]?.toFixed(1));
-    }
-    setHistory((prev) => [...prev, point].slice(-HISTORY_LENGTH));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick]);
 
   const scrollToDemo = () => {
     document.getElementById('live-demo')?.scrollIntoView({ behavior: 'smooth' });
@@ -211,8 +216,8 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 font-sans text-slate-800 dark:text-slate-200">
       {/* Nav */}
       <nav className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-wrap gap-3 items-center justify-between">
+          <div className="flex items-center gap-3 min-w-0">
             <img src={logo} alt={`${companyName} logo`} className="w-10 h-10 object-contain shrink-0" />
             <span className="font-bold text-lg text-slate-900 dark:text-slate-100 tracking-tight">{companyName}</span>
           </div>
@@ -227,7 +232,7 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
           </div>
         </div>
       </nav>
-
+      <main>
       {/* Hero */}
       <section className="relative overflow-hidden max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 text-center">
         <div className="pointer-events-none absolute inset-x-0 -top-24 flex justify-center -z-10">
@@ -260,7 +265,7 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
           </button>
         </div>
         <div className="mt-12 flex flex-wrap items-center justify-center gap-x-10 gap-y-4 text-sm text-slate-500 dark:text-slate-400">
-          <span className="flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-amber-500" /> 4 detection engines watching every reading</span>
+          <span className="flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-amber-500" /> Statistical insights plus configured threshold alerts</span>
           <span className="flex items-center gap-2"><Clock className="w-4 h-4 text-amber-500" /> Checked every 5 minutes, day and night</span>
           <span className="flex items-center gap-2"><MailCheck className="w-4 h-4 text-amber-500" /> Resolved alerts emailed too, so you know it's over</span>
         </div>
@@ -317,7 +322,12 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
             {SCENARIOS.map((s) => (
               <button
                 key={s.key}
-                onClick={() => setScenarioKey(s.key)}
+                onClick={() => {
+                  setScenarioKey(s.key);
+                  setTick(0);
+                  setStartedAt(Date.now());
+                }}
+                aria-pressed={s.key === scenarioKey}
                 className={`px-3.5 py-1.5 rounded-full text-sm font-medium border transition-colors ${
                   s.key === scenarioKey
                     ? 'bg-slate-900 text-white border-slate-900 dark:bg-amber-500 dark:text-slate-900 dark:border-amber-500'
@@ -339,56 +349,10 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
 
           <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm">
             <h3 className="font-semibold text-slate-900 dark:text-slate-100 mb-6">Live Trend Preview</h3>
-            <div className="h-72 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={history} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                  <defs>
-                    {demoSensors.map((sensor) => (
-                      <linearGradient key={sensor.id} id={`demo-gradient-${sensor.id}`} x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor={sensor.color} stopOpacity={0.3} />
-                        <stop offset="95%" stopColor={sensor.color} stopOpacity={0} />
-                      </linearGradient>
-                    ))}
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDark ? '#334155' : '#e2e8f0'} />
-                  <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{ fill: isDark ? '#64748b' : '#94a3b8', fontSize: 12 }} minTickGap={40} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fill: isDark ? '#64748b' : '#94a3b8', fontSize: 12 }} tickFormatter={(val) => `${val}°`} />
-                  <Tooltip
-                    contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 25px rgba(15, 23, 42, 0.1)', backgroundColor: isDark ? '#1e293b' : '#ffffff' }}
-                    labelStyle={{ color: isDark ? '#94a3b8' : '#64748b', marginBottom: '4px' }}
-                    itemStyle={{ color: isDark ? '#e2e8f0' : '#1e293b' }}
-                  />
-                  {alertSensor && (
-                    <ReferenceArea y1={alertSensor.safeMax} y2={200} fill="#ef4444" fillOpacity={0.08} ifOverflow="extendDomain" />
-                  )}
-                  {alertSensor && (
-                    <ReferenceLine
-                      y={alertSensor.safeMax}
-                      stroke="#ef4444"
-                      strokeDasharray="6 4"
-                      strokeWidth={1.5}
-                      ifOverflow="extendDomain"
-                      label={{ value: `${alertSensor.name} safe max ${alertSensor.safeMax}°F`, position: 'insideTopRight', fill: '#ef4444', fontSize: 11, fontWeight: 600 }}
-                    />
-                  )}
-                  {demoSensors.map((sensor) => (
-                    <Area
-                      key={sensor.id}
-                      type="monotone"
-                      dataKey={`sensor${sensor.id}`}
-                      name={sensor.name}
-                      stroke={sensor.color}
-                      strokeWidth={alertSensor?.id === sensor.id ? 3.5 : 2}
-                      strokeOpacity={alertSensor && alertSensor.id !== sensor.id ? 0.35 : 1}
-                      fillOpacity={alertSensor && alertSensor.id !== sensor.id ? 0.4 : 1}
-                      fill={`url(#demo-gradient-${sensor.id})`}
-                      dot={false}
-                      connectNulls
-                      animationDuration={400}
-                    />
-                  ))}
-                </AreaChart>
-              </ResponsiveContainer>
+            <div ref={chartRef} className="h-72 w-full">
+              {loadChart && <Suspense fallback={<p role="status">Loading demo chart...</p>}>
+                <DemoChart history={history} sensors={demoSensors} alertSensor={alertSensor} isDark={isDark} />
+              </Suspense>}
             </div>
           </div>
 
@@ -426,10 +390,11 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
         </div>
       </section>
 
+      </main>
       <footer className="border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-slate-500 dark:text-slate-400">
           <span>© {new Date().getFullYear()} {companyName}. All rights reserved.</span>
-          <div className="flex items-center gap-5">
+          <div className="flex flex-wrap justify-center items-center gap-x-5 gap-y-3">
             <a href={companyPhoneHref} className="flex items-center gap-1.5 hover:text-slate-900 dark:hover:text-white transition-colors">
               <Phone className="w-4 h-4" />
               {companyPhone}

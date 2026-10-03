@@ -1,31 +1,35 @@
-# Node-RED: MQTT → Supabase Ingestion
+# Node-RED: MQTT to Supabase
 
-This is the **production** bridge between the ESP32 boards ([../esp32 code](../esp32%20code))
-and Supabase's `sensor_data` table: it runs on the same Pi as the local MQTT broker, subscribes
-to `home/sensors/temp`, reshapes each payload into one row per sensor, and POSTs them to
-Supabase's REST API.
+Production ingestion flow, running on the Pi beside the MQTT broker. The
+[Node.js bridge](../mqtt-bridge) is an alternative; do not run both for the same messages.
 
-[mqtt-bridge](../mqtt-bridge) is a Node.js implementation of the same job — useful if you ever
-want to run this without Node-RED installed, but it isn't what's actually deployed.
+## Import and configuration
 
-## Importing
+1. Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in the Node-RED process environment.
+   The latter is a secret and bypasses RLS. Restart Node-RED after changing the environment.
+2. Import [flows.json](flows.json) and deploy it.
+3. Set broker credentials in **Local Pi Broker -> Security**. Require authentication on
+   the broker and configure matching credentials in each ESP32's setup portal.
+4. Verify the **Handle Supabase Response** status and Node-RED error log.
 
-In the Node-RED editor: menu → Import → paste [flows.json](flows.json) (or "select a file"),
-then open the **Push to Supabase** node and fill in the `apikey` / `Authorization` headers with
-your Supabase **service_role** key (Project Settings → API — this bypasses RLS, which is correct
-for a trusted backend process like this one, but never put it anywhere reachable from a browser),
-and open the **Local Pi Broker** config node's *Security* tab to set MQTT username/password if
-the broker requires auth.
+The exported HTTP node does not contain credentials or a hardcoded project URL: the
+formatter sets `msg.url` and `msg.headers` from the environment. Do not export filled
+service-role credentials back into source control.
 
-## What changed vs. the raw export
+## Validation and failures
 
-- **Format for Supabase** now checks that `temperatures` is an array and `device_id` is a string
-  before mapping, instead of throwing (and silently losing the message) on a malformed payload.
-- **Push to Supabase** has `senderr` enabled and its response is now wired to a new
-  **Handle Supabase Response** node, which logs (`node.error`) and surfaces a node status dot for
-  any non-2xx response — previously a failed insert (bad policy, network blip, schema mismatch)
-  had no visible trace anywhere.
-- The MQTT broker still has no username/password configured. Set one (Security tab on **Local Pi
-  Broker**) once your ESP32 boards are flashed with the `MQTT_USERNAME`/`MQTT_PASSWORD` support
-  added in [../esp32 code/config.h](../esp32%20code/config.h) — otherwise anything on the LAN can
-  publish fake sensor data or read every reading.
+The formatting function is generated from
+[shared/readingPayload.js](../shared/readingPayload.js). Regenerate it from the repository
+root using `node scripts/sync-node-red.mjs`; CI rejects a stale generated flow.
+
+Payloads must have a nonempty device identifier, a synchronized epoch-seconds timestamp,
+and a bounded array of finite DS18B20 temperatures or `null` disconnected probes. Indices
+are preserved. Invalid/missing timestamps are errors, not replaced with "now".
+
+Only an integer HTTP status in the 200-299 range shows green. Missing/non-numeric status,
+transport failure and non-2xx responses show red and log an error. Bad payloads are logged
+without dumping the complete payload.
+
+Writes are best-effort, not durably queued or automatically retried. Broker/Internet
+outages can lose readings; a durable queue and idempotent ingestion would be a separate
+operational upgrade.

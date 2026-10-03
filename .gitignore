@@ -1,3 +1,4 @@
-# These are personal/legacy folders, not part of the deployed dashboard
-esp32 code/
+# Legacy portfolio backup is not part of the deployed dashboard.
 my website backup/
+esp32 code/build/
+esp32 code/.pio/

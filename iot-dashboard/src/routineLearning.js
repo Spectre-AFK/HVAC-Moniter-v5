@@ -25,22 +25,25 @@ function minutesSinceMidnight(date) {
 }
 
 function formatMinutesOfDay(minutes) {
-  const wrapped = ((minutes % 1440) + 1440) % 1440;
+  const wrapped = ((Math.round(minutes) % 1440) + 1440) % 1440;
   const hour24 = Math.floor(wrapped / 60);
   const displayHour = hour24 % 12 === 0 ? 12 : hour24 % 12;
   const period = hour24 >= 12 ? 'PM' : 'AM';
-  return `${displayHour}:${String(Math.round(wrapped % 60)).padStart(2, '0')} ${period}`;
+  return `${displayHour}:${String(wrapped % 60).padStart(2, '0')} ${period}`;
 }
+
+const clockDifference = (a, b) => ((a - b + 2160) % 1440) - 720;
 
 /**
  * @param {{ occurred_at: string }[]} events - past events for one sensor, of one event_type, any order.
- * @returns {Record<number, { medianMinutes: number, madMinutes: number, sampleCount: number }>}
+ * @returns {Record<number, { medianMinutes: number, madMinutes: number, sampleCount: number, spansMidnight: boolean }>}
  *   Keyed by JS Date#getDay() (0 = Sunday). Only includes weekdays with enough samples.
  */
 export function buildRoutineProfile(events) {
   const minutesByWeekday = new Map();
   for (const event of events) {
     const date = new Date(event.occurred_at);
+    if (!Number.isFinite(date.getTime())) throw new TypeError('Invalid HVAC event timestamp.');
     const weekday = date.getDay();
     if (!minutesByWeekday.has(weekday)) minutesByWeekday.set(weekday, []);
     minutesByWeekday.get(weekday).push(minutesSinceMidnight(date));
@@ -49,9 +52,13 @@ export function buildRoutineProfile(events) {
   const profile = {};
   for (const [weekday, minutesList] of minutesByWeekday) {
     if (minutesList.length < MIN_SAMPLES_PER_WEEKDAY) continue;
-    const medianMinutes = median(minutesList);
-    const madMinutes = median(minutesList.map((m) => Math.abs(m - medianMinutes)));
-    profile[weekday] = { medianMinutes, madMinutes, sampleCount: minutesList.length };
+    const anchor = minutesList[0];
+    const medianMinutes = ((median(minutesList.map((m) => anchor + clockDifference(m, anchor))) % 1440) + 1440) % 1440;
+    const madMinutes = median(minutesList.map((m) => Math.abs(clockDifference(m, medianMinutes))));
+    profile[weekday] = {
+      medianMinutes, madMinutes, sampleCount: minutesList.length,
+      spansMidnight: Math.max(...minutesList) - Math.min(...minutesList) > 720,
+    };
   }
   return profile;
 }
@@ -64,24 +71,28 @@ export function buildRoutineProfile(events) {
  * @param {{ occurred_at: string }[]} events - past events for one sensor, of one event_type.
  * @param {string} label - sensor label used in the message.
  * @param {Date} [now] - injectable for testing; defaults to the current time.
- * @returns {Array<{ type: 'routine-established'|'routine-deviation'|'routine-missing', severity: 'low'|'medium', message: string }>}
+ * @returns {Array<{ type: 'routine-established'|'routine-deviation'|'routine-missing'|'routine-ambiguous', severity: 'low'|'medium', message: string }>}
  */
 export function detectRoutineDeviations(events, label, now = new Date()) {
-  const profile = buildRoutineProfile(events);
+  if (!Number.isFinite(now.getTime())) throw new TypeError('Invalid routine evaluation date.');
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  for (const event of events) {
+    if (!Number.isFinite(Date.parse(event.occurred_at))) throw new TypeError('Invalid HVAC event timestamp.');
+  }
+  const profile = buildRoutineProfile(events.filter((e) => new Date(e.occurred_at) < startOfToday));
   const weekday = now.getDay();
   const today = profile[weekday];
   if (!today) return [];
 
-  const startOfToday = new Date(now);
-  startOfToday.setHours(0, 0, 0, 0);
-  const todaysEvents = events.filter((e) => new Date(e.occurred_at) >= startOfToday);
+  const todaysEvents = events.filter((e) => new Date(e.occurred_at) >= startOfToday && new Date(e.occurred_at) <= now);
   const deviationThreshold = Math.max(DEVIATION_MIN_MINUTES, today.madMinutes * 2);
   const weekdayName = WEEKDAY_NAMES[weekday];
 
   if (todaysEvents.length > 0) {
     const latestToday = todaysEvents.reduce((a, b) => (new Date(a.occurred_at) > new Date(b.occurred_at) ? a : b));
     const actualMinutes = minutesSinceMidnight(new Date(latestToday.occurred_at));
-    const deviationMinutes = actualMinutes - today.medianMinutes;
+    const deviationMinutes = clockDifference(actualMinutes, today.medianMinutes);
 
     if (Math.abs(deviationMinutes) >= deviationThreshold) {
       return [
@@ -102,6 +113,12 @@ export function detectRoutineDeviations(events, label, now = new Date()) {
     ];
   }
 
+  if (today.spansMidnight) {
+    return [{
+      type: 'routine-ambiguous', severity: 'low',
+      message: `${label}'s learned clock times span midnight. A missing event cannot be assigned reliably to this calendar day.`,
+    }];
+  }
   const minutesNow = minutesSinceMidnight(now);
   if (minutesNow >= today.medianMinutes + Math.max(MISSING_EVENT_GRACE_MINUTES, deviationThreshold)) {
     return [

@@ -1,374 +1,189 @@
 # HVAC Telemetry Hub
 
-A React + Vite dashboard for monitoring live temperature data streamed from ESP32 edge devices, backed by Supabase for authentication and storage.
+React + Vite dashboard for ESP32 temperature probes, with Supabase authentication/storage
+and a Cloudflare Worker for hosting, admin user lookup, scheduled threshold emails and
+persisted temperature-pattern events.
 
-## Features
+## Setup
 
-- **Marketing landing page** — a public page with a simulated live demo dashboard, shown before sign-in.
-- **Authenticated access** — email/password sign-in via Supabase Auth; the real dashboard is hidden until a session exists.
-- **Light/dark theme toggle** — available on every screen, defaults to dark, and persists across visits.
-- **Live temperature readout** — current reading (converted from °C to °F) with a color-coded status (cold/normal/hot).
-- **Multi-sensor support** — every sensor detected in the incoming data is shown on one dashboard.
-- **Rolling statistics** — max, average, and min temperature per sensor over the selected date range.
-- **Historical trend chart** — combined line chart (via Recharts) of every sensor over time.
-- **Auto-refresh** — polls Supabase every 60 seconds when viewing live data, with a manual "force sync" button.
-- **Admin device access panel** — admins can grant or revoke a user's access to a specific sensor.
-- **Anomaly detection** — plain-statistics checks (z-score, trend slope, flatline) flag unusual readings per sensor, client-side, for free.
-- **AI anomaly summaries** — an optional "Summarize with AI" button sends already-detected anomalies to a Cloudflare Worker (Workers AI) to generate a plain-English explanation for technicians.
-- **Sensor alerts** — any signed-in user can set a high/low °F threshold per sensor; a Cloudflare Worker Cron Trigger checks readings every 5 minutes and emails them when a threshold is crossed (and again when it clears).
+Use Node.js 22 and a Supabase project with email/password authentication enabled.
+From the repository root:
 
-## Tech Stack
-
-- [React 19](https://react.dev/) + [Vite](https://vitejs.dev/)
-- [Supabase](https://supabase.com/) (`@supabase/supabase-js`) for auth and data
-- [Recharts](https://recharts.org/) for charting
-- [Tailwind CSS](https://tailwindcss.com/) for styling
-- [lucide-react](https://lucide.dev/) for icons
-- [Oxlint](https://oxc.rs/) for linting
-- [Cloudflare Workers](https://developers.cloudflare.com/workers/) + [Workers AI](https://developers.cloudflare.com/workers-ai/) for hosting and the anomaly-summary endpoint
-
-## Getting Started
-
-### Prerequisites
-
-- Node.js (LTS recommended)
-- A Supabase project with:
-  - Auth enabled (email/password)
-  - A `sensor_data` table with at least: `device_id`, `sensor_index`, `temperature_c`, `timestamp`
-  - A `device_permissions` table with at least: `id`, `user_id` (uuid), `device_id` (text), `sensor_index` (int)
-  - A `sensor_names` table with: `device_id` (text), `sensor_index` (int), `name` (text) — see "Naming Sensors" below
-
-### Install & Run
-
-```bash
-npm install
-cp .env.example .env   # then fill in your Supabase project values
-cp .dev.vars.example .dev.vars   # then fill in the same Supabase project values (for the Worker)
-npm run dev
+```powershell
+Set-Location iot-dashboard
+npm ci
+Copy-Item .env.example .env
+Copy-Item .dev.vars.example .dev.vars
 ```
 
-The app will be available at the local URL printed by Vite (typically `http://localhost:5173`).
+Fill in the local files, which are git-ignored. Never place a service-role key in a
+`VITE_` variable: those values are public and embedded in the browser bundle.
 
-The "Summarize with AI" button calls a Cloudflare Worker endpoint (`/api/anomaly-summary`), which Vite proxies to `http://127.0.0.1:8787`. Run it in a second terminal to test that feature locally:
+| Variable | Location | Purpose |
+| --- | --- | --- |
+| `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` | Dashboard `.env` | Public browser connection |
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Worker vars / `.dev.vars` | Verify sessions |
+| `SUPABASE_SERVICE_ROLE_KEY` | Worker secret / `.dev.vars` | Trusted database writes and admin lookups |
+| `RESEND_API_KEY` | Worker secret / `.dev.vars` | Threshold email provider |
+| `ALERT_FROM_EMAIL` | Worker var / `.dev.vars` | Sender on a verified Resend domain |
 
-```bash
-npm run dev:worker
-```
+### Database setup and upgrades
 
-### Other Scripts
+1. For a new project, run [supabase/schema.sql](supabase/schema.sql) in the SQL editor.
+   Existing tables are not replaced. Bootstrap tables are fail-closed until policies are applied.
+2. Review and run [the hardening migration](supabase/migrations/20261002_monitoring_hardening.sql).
+3. Run [supabase/verify_rls.sql](supabase/verify_rls.sql) and inspect every result.
 
-| Command              | Description                                          |
-| -------------------- | ----------------------------------------------------- |
-| `npm run dev`        | Start the Vite dev server                              |
-| `npm run dev:worker` | Start `wrangler dev` for the `/api/anomaly-summary` Worker |
-| `npm run build`      | Build for production                                   |
-| `npm run preview`    | Preview the production build                           |
-| `npm run lint`       | Run Oxlint                                             |
-| `npm run deploy`     | Build, then deploy the app + Worker to Cloudflare       |
+**The migration replaces every policy on the five monitoring tables.** Review custom
+policies before applying it. It leaves unrelated tables alone and runs in a transaction.
+Duplicate device grants cause the unique-index step to fail; inspect and resolve duplicates
+before retrying, rather than deleting data automatically.
 
-## Configuration
+New threshold/name constraints are `NOT VALID` so existing data is not deleted. New writes
+must comply. Repair old invalid rows identified by verification, then validate the constraints.
+Existing installations must have the columns/unique keys described in the bootstrap schema.
+Deploy the migration before the updated UI: notification-state columns are server-managed.
 
-Supabase connection details are read from environment variables (see [src/App.jsx](src/App.jsx)):
+Authenticated users can read readings, names and events only for sensors granted through
+`device_permissions`. Administrators can read all sensors and manage grants/names.
+Users can manage their own alert rules only for granted sensors (or any sensor for admins).
+Only trusted backend credentials can ingest data or update notification state.
 
-| Variable                    | Description                          |
-| --------------------------- | ------------------------------------- |
-| `VITE_SUPABASE_URL`         | Your Supabase project URL             |
-| `VITE_SUPABASE_ANON_KEY`    | Your Supabase anonymous/publishable key |
-
-Copy `.env.example` to `.env` and fill in your project's values. `.env` is git-ignored, so it won't be committed. Note that Vite exposes any `VITE_`-prefixed variable to the client bundle, so continue to rely on Supabase Row Level Security to protect your data — the anon key is not a secret, but should still be kept out of source control.
-
-## Verifying Row Level Security
-
-The RLS policies below are what actually enforce access control — the client-side `isAdmin`
-checks in the app are UI-only and don't stop a signed-in user from calling Supabase directly.
-Run [supabase/verify_rls.sql](../supabase/verify_rls.sql) in the Supabase SQL editor any time
-(especially after first setup, or after changing policies) to confirm RLS is enabled and which
-policies are actually attached, rather than assuming the setup SQL below was applied.
-
-## Admin Access
-
-The admin panel ([src/AdminPanel.jsx](src/AdminPanel.jsx)) lets an admin grant or revoke a user's access to a specific sensor on a specific device by inserting/deleting rows in `device_permissions`. `sensor_index` alone isn't unique — every ESP32 numbers its own sensors starting at 0 — so grants are keyed by `device_id` + `sensor_index` together. It's shown in the nav (gear icon) only when the signed-in user's session has `app_metadata.role === 'admin'`.
-
-The grant form searches for users by email (autocomplete) and picks the sensor from a dropdown populated with sensors that have reported data, instead of requiring the admin to paste a raw user UUID or type a device ID/sensor index by hand. The permissions list is grouped by user (resolved to an email) rather than shown as a flat table of raw IDs. Both the search and the email lookups shown in the permissions list call an admin-only Worker endpoint, `GET /api/admin/users` (see [worker/index.js](iot-dashboard/worker/index.js)), since only the Supabase service role key — not the anon key used by the browser client — can query the Admin Users API. That endpoint requires `SUPABASE_SERVICE_ROLE_KEY` to be set as a Worker secret (see below) and independently re-checks `app_metadata.role === 'admin'` server-side, so it can't be reached by a non-admin even if they call it directly.
-
-If you created `device_permissions` before this `device_id` column existed, add it with:
-
-```sql
-alter table public.device_permissions add column if not exists device_id text;
-```
-
-Existing rows will have `device_id = null` and won't match any sensor under the composite policy below until you backfill them (e.g. `update public.device_permissions set device_id = '...' where id = ...`).
-
-To make a user an admin, set their `app_metadata` from the Supabase dashboard or via the admin API (service role key required) — this field cannot be edited by the user themselves:
+Set an administrator's **app_metadata** from the Supabase dashboard/Admin API:
 
 ```json
 { "role": "admin" }
 ```
 
-**Important:** the client-side check above only controls UI visibility. Anyone with the anon key can otherwise call the same Supabase queries directly, so enforce this for real with Row Level Security policies on `device_permissions`, e.g. restrict `insert`/`delete` to requests where `auth.jwt() -> 'app_metadata' ->> 'role' = 'admin'`, and restrict `select` so users can only read their own permission rows (admins can read all).
+Do not use user-editable `user_metadata` for authorization. The Worker independently
+verifies sessions and administrator roles; client UI checks are not authorization.
 
-Run this in the Supabase SQL editor to enforce it:
+### Local development
 
-```sql
--- Enable RLS so no row is accessible unless a policy explicitly allows it
-alter table public.device_permissions enable row level security;
+From [iot-dashboard](iot-dashboard), run `npm run dev`. In a second terminal in that
+directory, run `npm run dev:worker` for API features. Vite proxies `/api` to port 8787.
+Local Worker credentials can reach real Supabase/Resend services; use a dedicated test
+project for scheduled tests, never production secrets.
 
--- Admins can see every permission row; regular users can only see their own
-create policy "device_permissions_select"
-on public.device_permissions
-for select
-to authenticated
-using (
-  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
-  or user_id = auth.uid()
-);
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Vite development server |
+| `npm run dev:worker` | Local Worker runtime |
+| `npm run lint` | Oxlint |
+| `npm test` | Detection, history, ingestion, UI, Worker and PostgreSQL policy tests |
+| `npm run build` | Production assets |
+| `npm run check` | Lint, tests and production build |
+| `npm run check:worker` | Worker packaging dry run; does not deploy |
+| `npm run preview` | Preview built assets; API routes require a Worker |
+| `npm run deploy` | Build and deploy to Cloudflare |
 
--- Only admins can grant access
-create policy "device_permissions_insert"
-on public.device_permissions
-for insert
-to authenticated
-with check (
-  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
-);
+CI runs checks with placeholder public credentials, packages the Worker without deployment,
+verifies generated ingestion code, audits dependencies and compiles the classic ESP32 target.
+PostgreSQL policy tests use an isolated in-memory PGlite database, not your live project.
 
--- Only admins can revoke access
-create policy "device_permissions_delete"
-on public.device_permissions
-for delete
-to authenticated
-using (
-  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
-);
-```
+## Dashboard behavior
 
-## Restricting Sensor Visibility
+- Public landing page uses simulated data, with its chart loaded near the viewport.
+- Email/password sign-in, light/dark theme and multi-device sensor cards.
+- Physical sensors are identified by **device_id + sensor_index**, not the index alone.
+- Readings are paginated in 500-row requests, up to **10,000 readings** per selected range.
+  Reaching the cap always displays a warning: statistics may be partial and slower sensors
+  may be absent. Narrow the date range for complete history.
+- Live history refreshes every minute; manual sync is available. Requests for obsolete
+  dates/users are cancelled and cannot replace the current user's data.
+- Fetch errors are shown explicitly. A loaded card is not proof of a healthy connection.
+  Paginated queries time out after 30 seconds so a stalled request can be retried.
+  Fixed-end ranges show `HISTORY`, not `LIVE`.
+- Min/average/max are computed from the loaded rows, not a server-side aggregate of omitted history.
+- Friendly sensor names are admin-editable, at most 100 characters.
+- Saved alert rules for sensors outside the current readings remain removable in the alerts panel.
+- Admin user search supports keyboard selection, paginates users, and reports its scan limit.
+  User-ID resolution is batched in groups of 50.
 
-By default, any authenticated user can read every row in `sensor_data`, regardless of what's granted in `device_permissions` — the permissions table only guards the admin panel above. To make `device_permissions` actually gate which sensors a user can view on the dashboard, add RLS to `sensor_data` as well:
+Pagination fixes an upper timestamp for each reading request; it is not an atomic database
+snapshot. Concurrent backfilled readings may move offset boundaries. For much larger
+installations, use a server-side inventory/aggregation and cursor-based pagination.
 
-```sql
-alter table public.sensor_data enable row level security;
+## Detection and its limits
 
--- Admins see every sensor; regular users only see sensors granted to them
-create policy "sensor_data_select"
-on public.sensor_data
-for select
-to authenticated
-using (
-  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
-  or exists (
-    select 1
-    from public.device_permissions dp
-    where dp.device_id = sensor_data.device_id
-      and dp.sensor_index = sensor_data.sensor_index
-      and dp.user_id = auth.uid()
-  )
-);
-```
+[anomalyDetection.js](iot-dashboard/src/anomalyDetection.js) performs deterministic
+z-score, short/long trend and flatline checks. It does not diagnose a mechanical fault.
 
-No frontend changes are required for this — [src/App.jsx](src/App.jsx) already derives its sensor selector and "awaiting telemetry" state from whatever rows Supabase returns, so it naturally reflects whatever the RLS policy allows.
+[cycleDetection.js](iot-dashboard/src/cycleDetection.js) infers temperature oscillations
+and unusually large drops. Temperature is **not a direct compressor-state measurement**.
+Short-cycle inference requires median sample spacing no greater than three minutes and
+no gap greater than six minutes. The default ten-minute firmware cadence cannot reliably
+resolve sub-twelve-minute equipment cycles; the dashboard reports insufficient sampling.
 
-**Note:** this only covers reads. Sensor rows are written by the ingestion flow described below
-([node-red](../node-red) in production, or [mqtt-bridge](../mqtt-bridge) as a Node.js
-alternative), both using the Supabase **service role key**, which bypasses RLS entirely, so
-enabling this policy won't affect ingestion.
+The Worker logs detected large-drop events to `hvac_events`, deduplicated by physical sensor,
+event type and occurrence timestamp.
+[routineLearning.js](iot-dashboard/src/routineLearning.js) uses prior-day events only,
+requiring four past same-weekday occurrences. Midnight-spanning times use circular clock
+differences. Today/future events cannot train the profile being evaluated.
+Clock profiles that straddle midnight report a timing caveat instead of declaring a
+missing same-day event without a reliable calendar assignment.
 
-## Naming Sensors
+Routine messages use the **viewer's local timezone**, update with time in live mode, and
+are hidden for historical ranges or capped event history. A site-specific timezone and
+multiple daily routine clusters remain future work.
 
-Each sensor card shows a single friendly label (falling back to `Sensor N · Device <last 4 hex chars of device_id>`). Admins can rename a sensor by hovering the label and clicking the pencil icon that appears; the name is stored in `sensor_names`, keyed by `device_id` + `sensor_index` together (not just `device_id`, since one board can have several probes), and applies everywhere that sensor appears (card, chart legend, anomaly messages).
+AI summaries are **disabled in the UI** by `AI_SUMMARY_ENABLED` in
+[App.jsx](iot-dashboard/src/App.jsx). The authenticated endpoint remains available.
+It validates flags and limits bodies to 64 KiB. Its rate limit is best-effort per isolate,
+not a distributed quota guarantee.
 
-Create the table and lock it down with RLS (any signed-in user can read the names; only admins can add or rename one):
+## Threshold emails
 
-```sql
-create table if not exists public.sensor_names (
-  device_id text not null,
-  sensor_index int not null,
-  name text not null,
-  updated_at timestamptz not null default now(),
-  primary key (device_id, sensor_index)
-);
+Users configure high/low thresholds through the bell panel. Thresholds must be finite;
+when both are set, low must be less than high.
 
-alter table public.sensor_names enable row level security;
+Every five minutes, the Cron Trigger evaluates enabled rules. It verifies the owner's
+current sensor access before reading temperatures. Revoked grants do not keep producing emails.
+Readings older than **30 minutes**, or more than five minutes in the future, are logged
+and do not trigger breach/recovery transitions. No separate offline-sensor email is sent.
 
-create policy "sensor_names_select"
-on public.sensor_names
-for select
-to authenticated
-using (true);
+Emails are sent for configured threshold transitions only, **not every statistical flag**.
+State changes only after provider acceptance. A bounded retry uses a Resend idempotency
+key for the same rule/transition/reading. This is not an exactly-once transactional outbox;
+provider acceptance followed by a database failure and a newer reading can still duplicate
+a notification. Cron failures are logged and fail the invocation rather than looking successful.
 
-create policy "sensor_names_insert"
-on public.sensor_names
-for insert
-to authenticated
-with check (
-  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
-);
+## Ingestion and firmware
 
-create policy "sensor_names_update"
-on public.sensor_names
-for update
-to authenticated
-using (
-  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
-)
-with check (
-  (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
-);
-```
+- [node-red](node-red): production MQTT-to-Supabase flow. Configure environment credentials
+  and broker authentication before importing the updated flow.
+- [mqtt-bridge](mqtt-bridge): alternative Node.js bridge; do not run both for the same topic.
+- [shared/readingPayload.js](shared/readingPayload.js): common payload validation.
+  Regenerate the Node-RED function with `node scripts/sync-node-red.mjs` after changing it.
+- [esp32 code](esp32%20code): versioned firmware, pinned classic ESP32 build profile and
+  [firmware instructions](esp32%20code/README.md).
 
-## Anomaly Detection & AI Summaries
+Both ingestion paths preserve probe indices, skip `null` disconnected probes, and reject
+malformed payloads/unsynchronized timestamps rather than substituting the current time.
+Writes are still best-effort: neither bridge has a durable offline queue. MQTT transport
+and the firmware setup portal are not suitable for an untrusted/public network.
 
-[src/anomalyDetection.js](src/anomalyDetection.js) runs three plain-statistics checks on each sensor's readings in the selected date range, entirely client-side and free:
+## Deployment and observability
 
-- **Z-score** — the latest reading is an outlier vs. that sensor's own recent mean/stddev.
-- **Trend** — a sustained rise or fall (linear regression slope) over recent readings, e.g. a slowly failing compressor.
-- **Flatline** — an unchanging value for many consecutive readings, e.g. a stuck or disconnected sensor.
+From [iot-dashboard](iot-dashboard), configure Worker secrets with the project-local CLI:
 
-When any anomalies are found, the dashboard shows them in an "Anomalies Detected" panel with a **Summarize with AI** button. That button calls the `/api/anomaly-summary` endpoint in [worker/index.js](worker/index.js), which runs on Cloudflare Workers AI (`@cf/meta/llama-3.1-8b-instruct-fast`) to turn the already-detected flags into a plain-English note for a technician — the model never sees raw sensor data and never decides what counts as an anomaly, it only explains flags the statistics already raised. The endpoint verifies the caller's Supabase session token before calling the model, so it can't be used by unauthenticated requests.
-
-To enable it, your Cloudflare account needs [Workers AI](https://developers.cloudflare.com/workers-ai/) access (available on the free tier with usage limits).
-
-## HVAC Cycle Detection & Routine Learning
-
-[src/cycleDetection.js](src/cycleDetection.js) runs a second set of plain-statistics checks, client-side and free, that read the temperature series as a compressor on/off signal rather than just looking for outliers:
-
-- **Cycle info** — the sensor's current on/off cadence (e.g. "cycling every ~42 min, running ~55% of that time"), found via peak/trough (zig-zag) detection on the temperature curve.
-- **Short-cycling** — the full on/off cycle is unusually fast (averaging under ~12 min), a sign of a hardware problem (failing capacitor, low refrigerant, oversized unit) rather than normal operation.
-- **Setback** — a sustained temperature drop much bigger than that sensor's own typical cooling-cycle swing, e.g. someone getting home and lowering the setpoint, distinguished from routine cycling by comparing against the median amplitude of its recent cooling cycles.
-
-Every 5 minutes, the same Cron Trigger that checks alert rules (see [worker/index.js](worker/index.js) `scheduled` handler) also re-runs the setback detector server-side, once, with the service role key, and logs any new setback event to `hvac_events` — this is purely to build durable history for routine learning below; it doesn't change what the client already shows for free.
-
-[src/routineLearning.js](src/routineLearning.js) then learns each sensor's usual setback time per weekday from that history (median + median-absolute-deviation, at least 4 past occurrences before a weekday counts as "learned") and flags:
-
-- **Routine established** — today's setback happened close to the usual time for this weekday.
-- **Routine deviation** — today's setback happened well earlier or later than usual.
-- **Routine missing** — well past the usual time for this weekday, with no setback detected yet today.
-
-This is still plain statistics (median/MAD time-of-day clustering), not a trained model — kept that way deliberately so it stays free, deterministic, and easy to reason about. If a genuine ML model is added later (e.g. to predict *when* you'll get home rather than just learn the median), it would slot in alongside this rather than replace it.
-
-Create the table and lock it down with RLS. Only the Worker's service role key writes to it (see the ingestion note in [supabase/verify_rls.sql](../supabase/verify_rls.sql) for why there's deliberately no anon/authenticated insert policy):
-
-```sql
-create table if not exists public.hvac_events (
-  id uuid primary key default gen_random_uuid(),
-  device_id text not null,
-  sensor_index int not null,
-  event_type text not null check (event_type in ('setback')),
-  occurred_at timestamptz not null,
-  amplitude_f numeric,
-  duration_minutes numeric,
-  typical_amplitude_f numeric,
-  created_at timestamptz not null default now(),
-  unique (device_id, sensor_index, event_type, occurred_at)
-);
-
-alter table public.hvac_events enable row level security;
-
-create policy "hvac_events_select"
-on public.hvac_events
-for select
-to authenticated
-using (true);
-```
-
-## Sensor Alerts
-
-Any signed-in user can open the bell icon in the nav to set a high and/or low °F threshold per sensor they can see (via [src/AlertSettings.jsx](src/AlertSettings.jsx)). A Cloudflare Worker Cron Trigger ([worker/index.js](worker/index.js) `scheduled` handler) runs every 5 minutes, compares each enabled rule against that sensor's latest reading, and emails the rule's owner once when a threshold is crossed and once more when the reading returns to normal — it won't re-email on every check while still breached.
-
-Create the table and lock it down with RLS (each user can only see/manage their own rules):
-
-```sql
-create table if not exists public.alert_rules (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users(id) on delete cascade,
-  device_id text not null,
-  sensor_index int not null,
-  high_f numeric,
-  low_f numeric,
-  enabled boolean not null default true,
-  is_triggered boolean not null default false,
-  last_notified_at timestamptz,
-  created_at timestamptz not null default now(),
-  unique (user_id, device_id, sensor_index),
-  constraint alert_rules_threshold_required check (high_f is not null or low_f is not null)
-);
-
-alter table public.alert_rules enable row level security;
-
-create policy "alert_rules_select" on public.alert_rules for select to authenticated using (user_id = auth.uid());
-create policy "alert_rules_insert" on public.alert_rules for insert to authenticated with check (user_id = auth.uid());
-create policy "alert_rules_update" on public.alert_rules for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
-create policy "alert_rules_delete" on public.alert_rules for delete to authenticated using (user_id = auth.uid());
-```
-
-The Cron Trigger runs with elevated access (it needs to read every user's rules and look up their email), so it authenticates to Supabase with the **service role key** instead of the anon key — never expose this key to the client. Set these as Worker secrets (see [.dev.vars.example](.dev.vars.example) for local dev):
-
-```bash
-wrangler secret put SUPABASE_SERVICE_ROLE_KEY   # Supabase dashboard: Project Settings > API > service_role key
-wrangler secret put RESEND_API_KEY              # from https://resend.com — or swap sendAlertEmail() in worker/index.js for another provider
-```
-
-And set the non-secret `ALERT_FROM_EMAIL` (the "from" address for alert emails) alongside the other Worker vars in [wrangler.jsonc](wrangler.jsonc) or the Cloudflare dashboard.
-
-**Note:** Cron Triggers only run on the deployed Worker, not `wrangler dev` — to test the alert check locally, temporarily call `checkAlertRules(env)` from an HTTP route, or use `wrangler dev --test-scheduled` and hit `/__scheduled`.
-
-After deploying, an admin can hit `GET /api/health` (with their Supabase auth token) to confirm those secrets actually made it into the Worker — it reports which required secrets are set (never their values) rather than only surfacing a missing key as a silent skipped-alert log line in `wrangler tail`.
-
-## Data Ingestion (MQTT → Supabase)
-
-The ESP32 boards ([esp32 code](../esp32%20code)) only publish readings to a local MQTT broker — nothing in `iot-dashboard/` reads that broker directly. That's handled by a separate always-on process:
-
-- **[node-red](../node-red)** — the flow actually running in production, on the same Pi as the MQTT broker. See its README for import instructions and an important note about the Supabase key it uses.
-- **[mqtt-bridge](../mqtt-bridge)** — a Node.js equivalent, useful if you'd rather not run Node-RED.
-
-Either way, run it on a machine that can reach both the broker (usually the same LAN as the ESP32s) and the internet.
-
-Both the ESP32 firmware and the bridge/flow support MQTT username/password auth (configure a username/password on your broker, then set it via the ESP32's captive portal and the bridge's `.env` / Node-RED's broker config) — without it, any device on the network can publish fake readings or read every sensor's data.
-
-## Deployment
-
-This app deploys as a single [Cloudflare Worker](https://developers.cloudflare.com/workers/) that serves the built static assets and the `/api/anomaly-summary` endpoint (see [wrangler.jsonc](wrangler.jsonc)):
-
-```bash
+```powershell
+npm exec -- wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+npm exec -- wrangler secret put RESEND_API_KEY
 npm run deploy
 ```
 
-Before deploying, set the Worker's `SUPABASE_URL` and `SUPABASE_ANON_KEY` vars (same values as `.env`) either directly in `wrangler.jsonc`, or via the Cloudflare dashboard / `wrangler deploy --var` so they aren't hardcoded in the committed config. `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` still need to be set wherever `npm run build` runs, since Vite bakes them into the client bundle at build time.
+Secret commands change the deployed Worker; use them only against the intended project.
+[wrangler.jsonc](iot-dashboard/wrangler.jsonc) keeps public vars in source because deployment
+overwrites dashboard-set vars. Align its public Supabase project with the dashboard build.
 
-## Project Structure
+The Worker routes `/api/*` before static assets, uses structured logs, and enables logs plus
+sampled traces. `GET /api/health` is admin-only and reports configuration presence, not values
+or end-to-end email health. Dry-run packaging/tests do not prove live bindings, policies or delivery.
 
-```
-iot-dashboard/
-├── public/             # Static assets (favicon, icons)
-├── worker/
-│   └── index.js        # Cloudflare Worker: serves built assets + /api/anomaly-summary (Workers AI)
-├── src/
-│   ├── App.jsx         # Main dashboard UI, auth, and data-fetching logic
-│   ├── anomalyDetection.js # Plain-statistics anomaly checks (z-score, trend, flatline)
-│   ├── anomalyDetection.test.js # Vitest unit tests for the checks above
-│   ├── cycleDetection.js # HVAC on/off cycle detection (duty cycle, short-cycling, setback events)
-│   ├── cycleDetection.test.js # Vitest unit tests for the checks above
-│   ├── routineLearning.js # Learns each sensor's usual setback time per weekday from hvac_events
-│   ├── routineLearning.test.js # Vitest unit tests for the checks above
-│   ├── LandingPage.jsx # Public marketing page with a simulated live demo
-│   ├── AdminPanel.jsx  # Admin-only device access management
-│   ├── ThemeToggle.jsx # Light/dark mode toggle button
-│   ├── App.css
-│   ├── index.css       # Tailwind entry point
-│   └── main.jsx        # React entry point
-├── index.html
-├── wrangler.jsonc
-└── vite.config.js
+Cron jobs process at most 10,000 discovery/rule rows and fail visibly at that boundary.
+Large deployments also need batched database queries, durable jobs/outbox and a distributed
+rate limit to stay within platform subrequest/runtime limits.
 
-node-red/               # Production MQTT broker → Supabase sensor_data ingestion flow
-├── flows.json
-└── README.md
-
-mqtt-bridge/            # Node.js alternative to node-red/, not currently deployed
-├── bridge.js
-└── .env.example
-
-esp32 code/             # Arduino firmware for the ESP32 sensor boards
-├── main.ino
-└── config.h
-```
+Personal/legacy backups are not deployed by this project and remain git-ignored.
+Generated `.wrangler` state remains local and is not versioned.

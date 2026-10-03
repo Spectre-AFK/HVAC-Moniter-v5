@@ -64,6 +64,11 @@ describe('detectHvacPatterns — normal cycling', () => {
 });
 
 describe('detectHvacPatterns — short-cycling', () => {
+  it('does not diagnose short-cycling from ten-minute temperature samples', () => {
+    const flags = detectHvacPatterns([{ key: 's1', label: 'Test', readingsDesc: readings(buildCycles(2, 1, 20)) }]);
+    expect(flags.some(f => f.type === 'short-cycle')).toBe(false);
+    expect(flags.some(f => f.type === 'cycle-insufficient')).toBe(true);
+  });
   it('flags short-cycle when the full on/off cycle is very short', () => {
     // 1 reading per half-cycle at 3 min/reading = 3 min on, 3 min off = 6 min full cycle,
     // well under the 12-minute-average threshold once several cycles are averaged.

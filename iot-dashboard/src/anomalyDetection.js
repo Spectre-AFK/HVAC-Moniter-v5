@@ -78,14 +78,17 @@ export function detectAnomalies(perSensor) {
   const flags = [];
 
   for (const { key, label, readingsDesc } of perSensor) {
-    if (readingsDesc.length < MIN_READINGS_FOR_STATS) continue;
+    if (readingsDesc.some((r) => !Number.isFinite(r.tempF) || !Number.isFinite(Date.parse(r.timestamp)))) {
+      throw new TypeError('Anomaly detection requires finite temperatures and valid timestamps.');
+    }
+    if (readingsDesc.length === 0) continue;
 
     const temps = readingsDesc.map((r) => r.tempF);
     const avg = mean(temps);
     const sd = stddev(temps, avg);
     const latest = readingsDesc[0];
 
-    if (sd > 0) {
+    if (readingsDesc.length >= MIN_READINGS_FOR_STATS && sd > 0) {
       const z = (latest.tempF - avg) / sd;
       if (Math.abs(z) >= Z_SCORE_THRESHOLD) {
         flags.push({

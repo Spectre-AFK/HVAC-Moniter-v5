@@ -1,9 +1,6 @@
-// Rule-based HVAC on/off cycle detection — same "plain statistics, no ML" philosophy as
-// anomalyDetection.js. A cooling call shows up as a falling run in the temperature series
-// (peak -> trough); the compressor resting shows up as a rising run (trough -> peak). Walking
-// those peaks/troughs lets us report duty cycle, flag short-cycling (a real hardware fault),
-// and tell a routine cooling cycle apart from someone manually lowering the setpoint — no AI
-// needed for any of this, just zig-zag extrema detection on data we already have.
+// Rule-based temperature cycle inference — not a direct compressor on/off measurement.
+// Same plain-statistics philosophy as anomalyDetection.js. Peaks/troughs can suggest
+// cooling cycles or setpoint changes, but other causes can produce similar curves.
 
 const MIN_READINGS_FOR_CYCLES = 20;
 // Only look at recent history for "current" cycling behavior, mirroring anomalyDetection.js's trend windows.
@@ -82,15 +79,27 @@ function findExtrema(readingsAsc, prominenceF) {
 /**
  * @param {{ key: string, label: string, readingsDesc: { timestamp: string, tempF: number }[] }[]} perSensor
  *   Same shape as anomalyDetection.js's detectAnomalies — readingsDesc must be newest-first.
- * @returns {Array<{ key: string, type: 'cycle-info'|'short-cycle'|'setback', severity: 'low'|'medium'|'high', message: string }>}
+ * @returns {Array<{ key: string, type: 'cycle-info'|'cycle-insufficient'|'short-cycle'|'setback', severity: 'low'|'medium'|'high', message: string }>}
  */
 export function detectHvacPatterns(perSensor) {
   const flags = [];
 
   for (const { key, label, readingsDesc } of perSensor) {
+    if (readingsDesc.some((r) => !Number.isFinite(r.tempF) || !Number.isFinite(Date.parse(r.timestamp)))) {
+      throw new TypeError('Cycle detection requires finite temperatures and valid timestamps.');
+    }
     if (readingsDesc.length < MIN_READINGS_FOR_CYCLES) continue;
 
     const windowAsc = readingsDesc.slice(0, Math.min(readingsDesc.length, CYCLE_WINDOW_MAX_POINTS)).slice().reverse();
+    const gaps = windowAsc.slice(1).map((r, i) => minutesBetween(windowAsc[i].timestamp, r.timestamp));
+    if (gaps.some((gap) => gap === 0)) {
+      flags.push({
+        key, type: 'cycle-insufficient', severity: 'low',
+        message: `${label} has repeated timestamps. Reliable cycle timing needs distinct sample times; check for duplicate ingestion.`,
+      });
+      continue;
+    }
+    const sampleMinutes = median(gaps);
     const extrema = findExtrema(windowAsc, EXTREMA_PROMINENCE_F);
     if (extrema.length < 3) continue;
 
@@ -131,19 +140,29 @@ export function detectHvacPatterns(perSensor) {
       const avgCoolingMinutes = mean(recentCycles.map((c) => c.coolingMinutes));
       const dutyCyclePct = (avgCoolingMinutes / avgTotalMinutes) * 100;
 
-      if (avgTotalMinutes <= SHORT_CYCLE_MINUTES_THRESHOLD) {
+      const samplingAdequate = sampleMinutes <= SHORT_CYCLE_MINUTES_THRESHOLD / 4 &&
+        Math.max(...gaps) <= SHORT_CYCLE_MINUTES_THRESHOLD / 2;
+      if (!samplingAdequate) {
+        flags.push({
+          key,
+          type: 'cycle-insufficient',
+          severity: 'low',
+          message: `${label}'s temperature sampling is too sparse or interrupted to reliably assess cycles under ${SHORT_CYCLE_MINUTES_THRESHOLD} min. Temperature is not a direct compressor-state measurement.`,
+        });
+      }
+      if (samplingAdequate && avgTotalMinutes <= SHORT_CYCLE_MINUTES_THRESHOLD) {
         flags.push({
           key,
           type: 'short-cycle',
           severity: avgTotalMinutes <= SHORT_CYCLE_MINUTES_THRESHOLD * 0.6 ? 'high' : 'medium',
-          message: `${label} is short-cycling — averaging a full on/off cycle every ${avgTotalMinutes.toFixed(0)} min over its last ${recentCycles.length} cycles. Frequent short cycles can mean a failing capacitor, low refrigerant, or an oversized unit.`,
+          message: `${label} shows rapid temperature cycling — averaging ${avgTotalMinutes.toFixed(0)} min over its last ${recentCycles.length} sampled cycles. This may suggest compressor short-cycling; verify equipment operation before diagnosing a fault.`,
         });
-      } else {
+      } else if (avgTotalMinutes > SHORT_CYCLE_MINUTES_THRESHOLD) {
         flags.push({
           key,
           type: 'cycle-info',
           severity: 'low',
-          message: `${label} is cycling on/off roughly every ${avgTotalMinutes.toFixed(0)} min (running ~${dutyCyclePct.toFixed(0)}% of that time) over its last ${recentCycles.length} cycles.`,
+          message: `${label}'s temperature oscillates roughly every ${avgTotalMinutes.toFixed(0)} min (falling ~${dutyCyclePct.toFixed(0)}% of the sampled cycle) over its last ${recentCycles.length} cycles. Equipment runtime is inferred, not measured.`,
         });
       }
     }

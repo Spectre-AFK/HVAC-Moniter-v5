@@ -1,22 +1,22 @@
-import React, { useState, useEffect, useMemo } from 'react';
-// Import Supabase directly from esm.sh to avoid dependency resolution errors in this environment
+import React, { lazy, Suspense, useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
-import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer 
-} from 'recharts';
 import { 
   Thermometer, Server, Activity, Clock, ShieldAlert, LogOut, Settings, Hash, RefreshCcw, Phone, Mail, 
   TrendingUp, TrendingDown, AlertTriangle, Sparkles, Pencil, BellRing 
 } from 'lucide-react';
-import AdminPanel from './AdminPanel';
-import AlertSettings from './AlertSettings';
 import LandingPage from './LandingPage';
 import ThemeToggle from './ThemeToggle';
 import logo from './assets/logo.png';
-import { detectAnomalies } from './anomalyDetection';
-import { detectHvacPatterns } from './cycleDetection';
 import { detectRoutineDeviations } from './routineLearning';
 import { useTypewriter } from './useTypewriter';
+import { fetchPagedRows, loadSensorHistory } from './history';
+import { sensorKey as makeSensorKey, shortDeviceId, sensorColor,
+  sensorNameLabel as getSensorNameLabel, sensorLabel as getSensorLabel } from './sensors';
+import { buildDashboard, sensorStaleness } from './dashboard';
+
+const AdminPanel = lazy(() => import('./AdminPanel'));
+const AlertSettings = lazy(() => import('./AlertSettings'));
+const TrendChart = lazy(() => import('./TrendChart'));
 
 const COMPANY_NAME = 'Accurate Air Conditioning';
 const COMPANY_PHONE = '(520) 230-5453';
@@ -25,20 +25,15 @@ const COMPANY_EMAIL = 'contact@aaronjauregui.com';
 
 // Statistical anomaly detection stays on; the LLM summary is disabled for now (overkill for current needs).
 const AI_SUMMARY_ENABLED = false;
+const EMPTY_READINGS = [];
 
 // --- Configuration ---
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-  throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY environment variables. Copy .env.example to .env and fill in your Supabase project values.');
-}
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const supabase = SUPABASE_URL && SUPABASE_ANON_KEY ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
 // --- Helper Functions ---
-const convertCtoF = (celsius) => (parseFloat(celsius) * 9/5) + 32;
-
 const formatTime = (isoString) => {
   const date = new Date(isoString);
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -62,15 +57,8 @@ const toDateTimeLocal = (date) => {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
-// One distinct color per physical sensor (device_id + sensor_index) so the combined
-// chart and per-sensor cards stay visually consistent with each other.
-const SENSOR_COLORS = ['#f59e0b', '#3b82f6', '#10b981', '#a855f7', '#ef4444'];
-const sensorColor = (idx) => SENSOR_COLORS[idx % SENSOR_COLORS.length];
-
 // sensor_index alone isn't unique across devices (each ESP32 numbers its own sensors from 0),
 // so every physical sensor must be identified by device_id + sensor_index together.
-const sensorKey = (d) => `${d.device_id}_${d.sensor_index}`;
-const shortDeviceId = (deviceId) => (deviceId ? deviceId.slice(-4).toUpperCase() : '????');
 
 function CompanyLogo({ className = 'w-9 h-9' }) {
   return <img src={logo} alt={`${COMPANY_NAME} logo`} className={`${className} object-contain shrink-0`} />;
@@ -78,16 +66,37 @@ function CompanyLogo({ className = 'w-9 h-9' }) {
 
 // --- Main Application Component ---
 export default function App() {
+  if (!supabase) {
+    return <div role="alert" className="min-h-screen p-8 bg-slate-950 text-white">
+      <h1 className="text-xl font-semibold">Dashboard configuration is missing</h1>
+      <p>Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY before building or starting the dashboard.</p>
+    </div>;
+  }
+  return <ConfiguredApp />;
+}
+
+function ConfiguredApp() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [authView, setAuthView] = useState('landing'); // 'landing' | 'login', shown only when signed out
   const [isDark, setIsDark] = useState(() => localStorage.getItem('theme') !== 'light');
-  const [sensorData, setSensorData] = useState([]);
+  const [sensorHistory, setSensorHistory] = useState(null);
+  const [dataError, setDataError] = useState('');
+  const [namesError, setNamesError] = useState('');
+  const [eventsError, setEventsError] = useState('');
+  const [operationError, setOperationError] = useState('');
+  const [eventsLimitReached, setEventsLimitReached] = useState(false);
+  const requestRef = useRef(null);
+  const userRef = useRef(null);
   const [isSyncing, setIsSyncing] = useState(false);
   const [view, setView] = useState('dashboard');
   const [startDate, setStartDate] = useState(() => toDateTimeLocal(new Date(Date.now() - 24 * 60 * 60 * 1000)));
   const [endDate, setEndDate] = useState('');
   const isLive = endDate === '';
+  const userId = session?.user?.id;
+  const rangeKey = `${startDate}|${endDate}`;
+  const activeHistory = sensorHistory?.userId === userId && sensorHistory?.rangeKey === rangeKey ? sensorHistory : null;
+  const sensorData = activeHistory?.rows ?? EMPTY_READINGS;
   const [aiSummary, setAiSummary] = useState('');
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [summaryError, setSummaryError] = useState('');
@@ -106,14 +115,14 @@ export default function App() {
   // learn each sensor's usual routine (src/routineLearning.js) — independent of the chart's
   // selected date range since routine learning needs long history, not just what's on screen.
   const [hvacEvents, setHvacEvents] = useState([]);
-  const sensorNameLabel = (key, sensorIndex) => sensorNames[key]?.trim() || `Sensor ${sensorIndex}`;
-  const sensorLabel = (key, deviceId, sensorIndex) =>
-    `${sensorNameLabel(key, sensorIndex)} · Device ${shortDeviceId(deviceId)}`;
+  const sensorNameLabel = useCallback((key, sensorIndex) => getSensorNameLabel(sensorNames, key, sensorIndex), [sensorNames]);
+  const sensorLabel = useCallback((_key, deviceId, sensorIndex) => getSensorLabel(sensorNames, deviceId, sensorIndex), [sensorNames]);
 
   // Authentication Setup
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDark);
@@ -121,42 +130,72 @@ export default function App() {
   }, [isDark]);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
+    let active = true;
+    let authChanged = false;
+    const applySession = (next) => {
+      if (!active) return;
+      const nextId = next?.user?.id ?? null;
+      if (userRef.current !== nextId) {
+        requestRef.current?.abort();
+        userRef.current = nextId;
+        setSensorHistory(null);
+        setSensorNames({});
+        setHvacEvents([]);
+        setView('dashboard');
+        setEditingSensorKey(null);
+        setPassword('');
+        setAiSummary('');
+        setDataError('');
+        setNamesError('');
+        setEventsError('');
+        setOperationError('');
+        setEventsLimitReached(false);
+      }
+      setSession(next);
+      setLoading(false);
+    };
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, next) => {
+      authChanged = true;
+      applySession(next);
+    });
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!active || authChanged) return;
+      if (error) throw error;
+      applySession(data.session);
+    }).catch((error) => {
+      if (!active) return;
+      console.error('Failed to restore session:', error.message);
+      setAuthError('Could not restore your session. Please sign in again.');
+      setAuthView('login');
       setLoading(false);
     });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-    });
-
-    return () => subscription.unsubscribe();
+    return () => {
+      active = false;
+      requestRef.current?.abort();
+      subscription.unsubscribe();
+    };
   }, []);
 
-  const fetchData = async () => {
-    if (!session) return;
+  const fetchData = useCallback(async () => {
+    if (!userId) return;
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
     setIsSyncing(true);
-    
+    setDataError('');
     try {
-      let query = supabase
-        .from('sensor_data')
-        .select('*')
-        .order('timestamp', { ascending: false })
-        .limit(2000);
-
-      if (startDate) query = query.gte('timestamp', new Date(startDate).toISOString());
-      if (endDate) query = query.lte('timestamp', new Date(endDate).toISOString());
-
-      const { data, error } = await query;
-
-      if (error) throw error;
-      setSensorData(data || []);
+      const result = await loadSensorHistory(supabase, { startDate, endDate, signal: controller.signal });
+      if (!controller.signal.aborted && userRef.current === userId) {
+        setSensorHistory({ ...result, userId, rangeKey });
+      }
     } catch (error) {
+      if (controller.signal.aborted) return;
       console.error('Error fetching data:', error.message);
+      setDataError(`Could not load telemetry: ${error.message}`);
     } finally {
-      setIsSyncing(false);
+      if (requestRef.current === controller) setIsSyncing(false);
     }
-  };
+  }, [userId, startDate, endDate, rangeKey]);
 
   const handleSummarizeAnomalies = async () => {
     if (!dashboard?.anomalies?.length) return;
@@ -182,64 +221,89 @@ export default function App() {
     }
   };
 
-  const fetchSensorNames = async () => {
-    const { data, error } = await supabase.from('sensor_names').select('*');
-    if (error) {
+  const fetchSensorNames = useCallback(async (signal) => {
+    try {
+      const { rows, limitReached } = await fetchPagedRows(() => supabase.from('sensor_names').select('*')
+        .order('device_id').order('sensor_index'), { signal });
+      if (limitReached) throw new Error('Sensor name limit reached. Narrow the deployment or raise the configured limit.');
+      if (signal.aborted || userRef.current !== userId) return;
+      const map = {};
+      for (const row of rows) map[makeSensorKey(row.device_id, row.sensor_index)] = row.name;
+      setSensorNames(map);
+      setNamesError('');
+    } catch (error) {
+      if (signal.aborted || userRef.current !== userId) return;
       console.error('Error fetching sensor names:', error.message);
-      return;
+      setNamesError(`Could not load sensor names: ${error.message}`);
     }
-    const map = {};
-    for (const row of data || []) map[`${row.device_id}_${row.sensor_index}`] = row.name;
-    setSensorNames(map);
-  };
+  }, [userId]);
 
   // 90 days of history is plenty for weekday routine learning without the query growing unbounded.
-  const fetchHvacEvents = async () => {
+  const fetchHvacEvents = useCallback(async (signal) => {
     const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
-    const { data, error } = await supabase
-      .from('hvac_events')
-      .select('*')
-      .gte('occurred_at', ninetyDaysAgo)
-      .order('occurred_at', { ascending: true });
-    if (error) {
+    try {
+      const result = await fetchPagedRows(() => supabase.from('hvac_events').select('*')
+        .gte('occurred_at', ninetyDaysAgo).order('occurred_at', { ascending: false }).order('id'), { signal });
+      if (signal.aborted || userRef.current !== userId) return;
+      setHvacEvents(result.rows);
+      setEventsLimitReached(result.limitReached);
+      setEventsError('');
+    } catch (error) {
+      if (signal.aborted || userRef.current !== userId) return;
       console.error('Error fetching HVAC events:', error.message);
-      return;
+      setEventsError(`Could not load routine history: ${error.message}`);
     }
-    setHvacEvents(data || []);
-  };
+  }, [userId]);
 
   const saveSensorName = async (key, deviceId, sensorIndex) => {
     const trimmed = editingName.trim();
-    setEditingSensorKey(null);
-    if (!trimmed || trimmed === sensorNames[key]) return;
-
-    const { error } = await supabase
-      .from('sensor_names')
-      .upsert({ device_id: deviceId, sensor_index: sensorIndex, name: trimmed });
-    if (error) {
-      console.error('Error saving sensor name:', error.message);
+    if (!trimmed || trimmed === sensorNames[key]) {
+      setEditingSensorKey(null);
       return;
     }
-    setSensorNames((prev) => ({ ...prev, [key]: trimmed }));
+    if (trimmed.length > 100) {
+      setOperationError('Sensor names must be 100 characters or fewer.');
+      return;
+    }
+
+    try {
+      const { error } = await supabase.from('sensor_names')
+        .upsert({ device_id: deviceId, sensor_index: sensorIndex, name: trimmed });
+      if (error) throw error;
+      if (userRef.current !== userId) return;
+      setSensorNames((prev) => ({ ...prev, [key]: trimmed }));
+      setEditingSensorKey(null);
+      setOperationError('');
+    } catch (error) {
+      if (userRef.current !== userId) return;
+      console.error('Error saving sensor name:', error.message);
+      setOperationError(`Could not save sensor name: ${error.message}`);
+    }
   };
 
   useEffect(() => {
     fetchData();
     // Only poll for fresh data when the end of the range is "live" (no fixed end date)
-    if (!isLive) return;
-    const interval = setInterval(fetchData, 60000);
-    return () => clearInterval(interval);
-  }, [session, startDate, endDate]);
+    const interval = isLive ? setInterval(fetchData, 60000) : null;
+    return () => {
+      clearInterval(interval);
+      requestRef.current?.abort();
+    };
+  }, [fetchData, isLive]);
 
   useEffect(() => {
-    if (!session) return;
-    fetchSensorNames();
-    fetchHvacEvents();
+    if (!userId) return;
+    const controller = new AbortController();
+    fetchSensorNames(controller.signal);
+    fetchHvacEvents(controller.signal);
     // New setback events only land every so often (worker cron), so this only needs to be
     // much less frequent than the live sensor-data poll above.
-    const interval = setInterval(fetchHvacEvents, 5 * 60000);
-    return () => clearInterval(interval);
-  }, [session]);
+    const interval = setInterval(() => fetchHvacEvents(controller.signal), 5 * 60000);
+    return () => {
+      controller.abort();
+      clearInterval(interval);
+    };
+  }, [userId, fetchSensorNames, fetchHvacEvents]);
 
   // A changed date range means different anomalies, so any prior AI summary no longer applies —
   // but routine auto-refresh polling shouldn't wipe a summary the user just generated.
@@ -249,7 +313,7 @@ export default function App() {
   }, [startDate, endDate]);
 
   // Ticks independently of data fetches so "time since last reading" stays accurate between polls
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!isLive) return;
     const tick = setInterval(() => setNow(Date.now()), 5000);
@@ -258,99 +322,49 @@ export default function App() {
 
   // Builds per-sensor stats plus a single time-aligned chart series covering every sensor,
   // so the whole rig can be viewed together instead of switching between sensors one at a time.
-  const dashboard = useMemo(() => {
-    if (!sensorData.length) return null;
+  const dashboard = useMemo(() => buildDashboard(sensorData, sensorNames), [sensorData, sensorNames]);
 
-    // Composite key, not sensor_index alone: two ESP32s both number their sensors from 0.
-    const uniqueSensorKeys = [...new Set(sensorData.map(sensorKey))].sort();
-
-    const perSensor = uniqueSensorKeys.map((key, colorIndex) => {
-      const readings = sensorData.filter(d => sensorKey(d) === key);
-      const latest = readings[0];
-      const { device_id: deviceId, sensor_index: sensorIndex } = latest;
-      const latestTempF = convertCtoF(latest.temperature_c);
-
-      const temps = readings.map(d => convertCtoF(d.temperature_c));
-      const max = Math.max(...temps);
-      const min = Math.min(...temps);
-      const avg = temps.reduce((a, b) => a + b, 0) / temps.length;
-
-      // Kept for staleness detection: each device may publish at a different rate
-      const recentTimestamps = readings.slice(0, 7).map(d => d.timestamp);
-
-      return { key, deviceId, sensorIndex, colorIndex, latest, latestTempF, max, min, avg, recentTimestamps };
-    });
-
-    // Readings from the same publish event share an identical timestamp, so grouping by
-    // timestamp lines every sensor's value up in a single row for the combined chart.
-    const byTimestamp = new Map();
-    for (const d of sensorData) {
-      if (!byTimestamp.has(d.timestamp)) {
-        byTimestamp.set(d.timestamp, { timestamp: d.timestamp, time: formatTime(d.timestamp) });
-      }
-      byTimestamp.get(d.timestamp)[sensorKey(d)] = Number(convertCtoF(d.temperature_c).toFixed(1));
-    }
-    const chartData = [...byTimestamp.values()].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-
-    const perSensorReadings = perSensor.map((s) => ({
-      key: s.key,
-      label: sensorLabel(s.key, s.deviceId, s.sensorIndex),
-      readingsDesc: sensorData
-        .filter((d) => sensorKey(d) === s.key)
-        .map((d) => ({ timestamp: d.timestamp, tempF: convertCtoF(d.temperature_c) })),
-    }));
-
-    const anomalies = detectAnomalies(perSensorReadings);
-    const hvacPatterns = detectHvacPatterns(perSensorReadings);
-
-    // Routine deviations use hvac_events history (logged by the worker cron), not sensorData,
-    // since learning a weekday pattern needs long history rather than just the selected range.
-    const routineFlags = perSensor.flatMap((s) => {
+  const nowMinute = Math.floor(now / 60000);
+  const routineFlags = useMemo(() => {
+    if (!dashboard || !isLive || eventsLimitReached) return [];
+    return dashboard.perSensor.flatMap((s) => {
       const sensorSetbacks = hvacEvents.filter(
         (e) => e.device_id === s.deviceId && e.sensor_index === s.sensorIndex && e.event_type === 'setback'
       );
-      return detectRoutineDeviations(sensorSetbacks, sensorLabel(s.key, s.deviceId, s.sensorIndex)).map((f) => ({
+      return detectRoutineDeviations(sensorSetbacks, sensorLabel(s.key, s.deviceId, s.sensorIndex), new Date(nowMinute * 60000)).map((f) => ({
         ...f,
         key: s.key,
       }));
     });
-
-    return { uniqueSensorKeys, perSensor, chartData, anomalies, hvacPatterns: [...hvacPatterns, ...routineFlags] };
-  }, [sensorData, sensorNames, hvacEvents]);
+  }, [dashboard, isLive, eventsLimitReached, hvacEvents, sensorLabel, nowMinute]);
 
   // Infers each sensor's own publish interval from the gaps between its recent readings,
   // rather than assuming a fixed rate shared by every device.
-  const stalenessBySensor = useMemo(() => {
-    const map = {};
-    if (!dashboard || !isLive) return map;
-
-    for (const sensor of dashboard.perSensor) {
-      const timestamps = sensor.recentTimestamps.map(t => new Date(t).getTime());
-      const deltas = [];
-      for (let i = 0; i < timestamps.length - 1; i++) {
-        deltas.push(timestamps[i] - timestamps[i + 1]);
-      }
-      deltas.sort((a, b) => a - b);
-      const expectedIntervalMs = deltas.length ? deltas[Math.floor(deltas.length / 2)] : null;
-
-      // Allow some slack over the device's usual interval, with a floor so brief jitter isn't flagged
-      const staleThresholdMs = Math.max((expectedIntervalMs ?? 60000) * 2.5, 60000);
-      const msSinceLastReading = now - timestamps[0];
-
-      map[sensor.key] = { isStale: msSinceLastReading > staleThresholdMs, msSinceLastReading };
-    }
-    return map;
-  }, [dashboard, isLive, now]);
+  const stalenessBySensor = useMemo(() => sensorStaleness(dashboard, isLive, now), [dashboard, isLive, now]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
     setAuthError('');
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) setAuthError(error.message);
+    setAuthBusy(true);
+    try {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+    } catch (error) {
+      console.error('Sign in failed:', error.message);
+      setAuthError(error.message);
+    } finally {
+      setAuthBusy(false);
+    }
   };
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+    } catch (error) {
+      console.error('Sign out failed:', error.message);
+      setOperationError(`Could not sign out: ${error.message}`);
+    }
   };
 
   if (loading) {
@@ -391,8 +405,10 @@ export default function App() {
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Email</label>
+              <label htmlFor="login-email" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Email</label>
               <input 
+                id="login-email"
+                autoComplete="username"
                 type="email" 
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -401,8 +417,10 @@ export default function App() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Password</label>
+              <label htmlFor="login-password" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Password</label>
               <input 
+                id="login-password"
+                autoComplete="current-password"
                 type="password" 
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -411,16 +429,17 @@ export default function App() {
               />
             </div>
             {authError && (
-              <div className="p-3 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 text-sm rounded-lg flex items-center gap-2">
+              <div role="alert" className="p-3 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400 text-sm rounded-lg flex items-center gap-2">
                 <ShieldAlert className="w-4 h-4" />
                 {authError}
               </div>
             )}
             <button 
               type="submit" 
+              disabled={authBusy}
               className="w-full bg-slate-900 text-white font-semibold py-2.5 rounded-lg hover:bg-slate-800 dark:bg-amber-500 dark:text-slate-900 dark:hover:bg-amber-400 transition-colors"
             >
-              Sign In
+              {authBusy ? 'Signing in...' : 'Sign In'}
             </button>
           </form>
         </div>
@@ -432,19 +451,19 @@ export default function App() {
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 font-sans text-slate-800 dark:text-slate-200 selection:bg-amber-500 selection:text-white">
       {/* Top Navigation */}
       <nav className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-24 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <CompanyLogo className="w-16 h-16" />
-            <div className="leading-tight">
-              <span className="font-bold text-2xl text-slate-900 dark:text-slate-100 tracking-tight block">{COMPANY_NAME}</span>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-wrap gap-3 items-center justify-between">
+          <div className="flex items-center gap-3 min-w-0">
+            <CompanyLogo className="w-10 h-10 sm:w-16 sm:h-16" />
+            <div className="leading-tight min-w-0">
+              <span className="font-bold text-lg sm:text-2xl text-slate-900 dark:text-slate-100 tracking-tight block">{COMPANY_NAME}</span>
               <span className="text-sm text-slate-500 dark:text-slate-400">HVAC Telemetry Dashboard</span>
             </div>
           </div>
           
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 flex-wrap">
             <div className="hidden sm:flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-3 py-1.5 rounded-full">
               <Server className="w-4 h-4" />
-              Supabase Connected
+              {dataError ? 'Sync failed' : isSyncing ? 'Syncing...' : activeHistory ? 'Telemetry loaded' : 'Ready to sync'}
             </div>
             {isAdmin && (
               <button
@@ -455,6 +474,8 @@ export default function App() {
                     : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800'
                 }`}
                 title="Admin: Device Access"
+                aria-label="Admin: Device Access"
+                aria-pressed={view === 'admin'}
               >
                 <Settings className="w-5 h-5" />
               </button>
@@ -467,6 +488,8 @@ export default function App() {
                   : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800'
               }`}
               title="Sensor Alerts"
+              aria-label="Sensor Alerts"
+              aria-pressed={view === 'alerts'}
             >
               <BellRing className="w-5 h-5" />
             </button>
@@ -475,6 +498,7 @@ export default function App() {
               onClick={handleLogout}
               className="p-2 text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors"
               title="Sign Out"
+              aria-label="Sign Out"
             >
               <LogOut className="w-5 h-5" />
             </button>
@@ -484,7 +508,22 @@ export default function App() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        
+        {[dataError, namesError, eventsError, operationError].filter(Boolean).map((message) => (
+          <div key={message} role="alert" className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+            {message}
+          </div>
+        ))}
+        {activeHistory?.limitReached && (
+          <p role="status" className="mb-4 rounded-lg border border-amber-300 p-3 text-sm text-amber-800 dark:text-amber-300">
+            Maximum of 10,000 readings reached. The chart and statistics may show only part of this date range, and some sensors may be missing. Narrow the range to see complete history.
+          </p>
+        )}
+        {eventsLimitReached && (
+          <p role="status" className="mb-4 text-sm text-amber-800 dark:text-amber-300">
+            Maximum of 10,000 routine events reached. Routine learning is paused because its history may be incomplete.
+          </p>
+        )}
+        <Suspense fallback={<p role="status">Loading panel...</p>}>
         {view === 'admin' && isAdmin ? (
           <AdminPanel
             supabase={supabase}
@@ -511,8 +550,8 @@ export default function App() {
         <>
         {/* Controls */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-end gap-4 mb-8">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm px-3 py-1.5">
+          <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
+            <div className="flex flex-wrap items-center gap-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm px-3 py-1.5 min-w-0">
               <label className="flex flex-col text-xs text-slate-400 dark:text-slate-500">
                 Start
                 <input
@@ -540,14 +579,17 @@ export default function App() {
                     : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800'
                 }`}
                 title="Toggle live end date"
+                aria-pressed={isLive}
               >
                 LIVE
               </button>
             </div>
             <button 
-              onClick={fetchData}
+              onClick={() => fetchData()}
+              disabled={isSyncing}
               className={`p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-all ${isSyncing ? 'animate-spin' : ''}`}
               title="Force Sync"
+              aria-label="Force Sync"
             >
               <RefreshCcw className="w-5 h-5" />
             </button>
@@ -600,25 +642,27 @@ export default function App() {
               {dashboard.perSensor.map((sensor) => {
                 const isStale = stalenessBySensor[sensor.key]?.isStale;
                 const sensorAnomalies = dashboard.anomalies.filter((f) => f.key === sensor.key);
-                const sensorPatterns = dashboard.hvacPatterns.filter((f) => f.key === sensor.key);
+                const sensorPatterns = [...dashboard.hvacPatterns, ...routineFlags].filter((f) => f.key === sensor.key);
                 return (
                   <div
                     key={sensor.key}
                     className={`rounded-2xl p-6 border shadow-sm transition-colors duration-500 ${getStatusBg(sensor.latestTempF)}`}
                   >
-                    <div className="flex justify-between items-start mb-4">
-                      <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap gap-2 justify-between items-start mb-4">
+                      <div className="flex items-center gap-2 min-w-0 flex-wrap">
                         <span
                           className="w-2.5 h-2.5 rounded-full shrink-0"
                           style={{ backgroundColor: sensorColor(sensor.colorIndex) }}
                         />
                         <Thermometer className={`w-5 h-5 ${getStatusColor(sensor.latestTempF)}`} />
-                        <span className="font-semibold text-slate-900 dark:text-slate-100 flex items-center">
-                          <span className="group/device inline-flex items-center gap-1">
+                        <span className="font-semibold text-slate-900 dark:text-slate-100 flex flex-wrap items-center min-w-0 max-w-full">
+                          <span className="group/device inline-flex items-center gap-1 min-w-0 max-w-full">
                             {editingSensorKey === sensor.key ? (
                               <input
                                 autoFocus
                                 type="text"
+                                aria-label={`Name for sensor ${sensor.sensorIndex}`}
+                                maxLength={100}
                                 value={editingName}
                                 onChange={(e) => setEditingName(e.target.value)}
                                 onBlur={() => saveSensorName(sensor.key, sensor.deviceId, sensor.sensorIndex)}
@@ -630,7 +674,7 @@ export default function App() {
                               />
                             ) : (
                               <>
-                                {sensorNameLabel(sensor.key, sensor.sensorIndex)}
+                                <span className="min-w-0 break-all">{sensorNameLabel(sensor.key, sensor.sensorIndex)}</span>
                                 {isAdmin && (
                                   <button
                                     type="button"
@@ -639,7 +683,8 @@ export default function App() {
                                       setEditingName(sensorNames[sensor.key] || '');
                                     }}
                                     title="Rename sensor"
-                                    className="opacity-0 group-hover/device:opacity-100 transition-opacity text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                                    aria-label={`Rename ${sensorNameLabel(sensor.key, sensor.sensorIndex)}`}
+                                    className="text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
                                   >
                                     <Pencil className="w-3 h-3" />
                                   </button>
@@ -666,7 +711,7 @@ export default function App() {
                             : 'bg-white/60 border-slate-200/50 text-slate-600 dark:bg-slate-800/60 dark:border-slate-700/50 dark:text-slate-300'
                         }`}>
                           <span className={`w-2 h-2 rounded-full ${isStale ? 'bg-red-500' : 'bg-emerald-500 animate-pulse'}`}></span>
-                          {isStale ? 'STALE' : 'LIVE'}
+                          {!isLive ? 'HISTORY' : dataError ? 'SYNC ERROR' : isStale ? 'STALE' : 'LIVE'}
                         </div>
                       </div>
                     </div>
@@ -711,7 +756,7 @@ export default function App() {
                             ) : (
                               <AlertTriangle className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${flag.severity === 'high' ? 'text-red-500' : 'text-amber-500'}`} />
                             )}
-                            <span>{flag.message}</span>
+                            <span className="min-w-0 break-words">{flag.message}</span>
                           </div>
                         ))}
                       </div>
@@ -726,7 +771,7 @@ export default function App() {
                             ) : (
                               <Activity className="w-3.5 h-3.5 mt-0.5 text-sky-500 shrink-0" />
                             )}
-                            <span>{flag.message}</span>
+                            <span className="min-w-0 break-words">{flag.message}</span>
                           </div>
                         ))}
                       </div>
@@ -738,7 +783,7 @@ export default function App() {
 
             {/* Combined Chart Section */}
             <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm">
-              <div className="flex items-center justify-between mb-6">
+              <div className="flex flex-wrap gap-3 items-center justify-between mb-6">
                 <h3 className="font-semibold text-slate-900 dark:text-slate-100">Historical Trend — All Sensors</h3>
                 <div className="flex items-center gap-2 text-xs text-slate-400 dark:text-slate-500">
                   <span>
@@ -750,44 +795,9 @@ export default function App() {
                 </div>
               </div>
               <div className="h-96 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={dashboard.chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDark ? '#334155' : '#e2e8f0'} />
-                    <XAxis 
-                      dataKey="time" 
-                      axisLine={false} 
-                      tickLine={false} 
-                      tick={{ fill: isDark ? '#64748b' : '#94a3b8', fontSize: 12 }}
-                      minTickGap={50}
-                    />
-                    <YAxis 
-                      axisLine={false} 
-                      tickLine={false} 
-                      tick={{ fill: isDark ? '#64748b' : '#94a3b8', fontSize: 12 }}
-                      domain={['dataMin - 2', 'dataMax + 2']}
-                      tickFormatter={(val) => `${val}°`}
-                    />
-                    <Tooltip 
-                      contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 25px rgba(15, 23, 42, 0.1)', backgroundColor: isDark ? '#1e293b' : '#ffffff' }}
-                      labelStyle={{ color: isDark ? '#94a3b8' : '#64748b', marginBottom: '4px' }}
-                      itemStyle={{ color: isDark ? '#e2e8f0' : '#1e293b' }}
-                    />
-                    <Legend wrapperStyle={{ fontSize: 12 }} />
-                    {dashboard.perSensor.map((sensor) => (
-                      <Line
-                        key={sensor.key}
-                        type="monotone"
-                        dataKey={sensor.key}
-                        name={sensorLabel(sensor.key, sensor.deviceId, sensor.sensorIndex)}
-                        stroke={sensorColor(sensor.colorIndex)}
-                        strokeWidth={2.5}
-                        dot={false}
-                        connectNulls
-                        animationDuration={500}
-                      />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
+                <Suspense fallback={<p role="status">Loading chart...</p>}>
+                  <TrendChart dashboard={dashboard} names={sensorNames} isDark={isDark} />
+                </Suspense>
               </div>
             </div>
 
@@ -797,20 +807,22 @@ export default function App() {
             <div className="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mb-4">
               <Activity className="w-8 h-8 text-slate-400 dark:text-slate-500" />
             </div>
-            <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Awaiting Telemetry</h3>
+            <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">{isSyncing ? 'Loading Telemetry' : dataError ? 'Telemetry Unavailable' : 'No Readings in This Range'}</h3>
             <p className="text-slate-500 dark:text-slate-400 max-w-sm mt-2">
-              The system is connected to Supabase but no sensor readings have been received yet.
+              {dataError ? 'Use Force Sync to retry. Previously loaded readings, if any, are not proof of a healthy connection.'
+                : 'No accessible readings match the selected dates. Try a wider range or ask an administrator to check your sensor access.'}
             </p>
           </div>
         )}
         </>
         )}
+        </Suspense>
       </main>
 
       <footer className="border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-sm text-slate-500 dark:text-slate-400">
           <span>© {new Date().getFullYear()} {COMPANY_NAME}. All rights reserved.</span>
-          <div className="flex items-center gap-5">
+          <div className="flex flex-wrap justify-center items-center gap-x-5 gap-y-3">
             <a href={COMPANY_PHONE_HREF} className="flex items-center gap-1.5 hover:text-slate-900 dark:hover:text-white transition-colors">
               <Phone className="w-4 h-4" />
               {COMPANY_PHONE}

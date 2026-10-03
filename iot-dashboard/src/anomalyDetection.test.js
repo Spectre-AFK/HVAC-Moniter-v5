@@ -76,6 +76,11 @@ describe('detectAnomalies — z-score outliers', () => {
 });
 
 describe('detectAnomalies — trends', () => {
+  it('detects a six-point short trend without requiring ten z-score samples', () => {
+    const flags = detectAnomalies([{ key: 's1', label: 'Test', readingsDesc: readings([65, 66, 67, 68, 69, 70]) }]);
+    expect(flags.some(f => f.type === 'trend-short')).toBe(true);
+    expect(flags.some(f => f.type === 'zscore')).toBe(false);
+  });
   it('flags a rising short-term trend', () => {
     // +0.3F every 10 minutes = 1.8F/hour, above the 1.5F/hour short-term threshold.
     const tempsAsc = Array.from({ length: 20 }, (_, i) => 65 + i * 0.3);

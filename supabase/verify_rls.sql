@@ -3,8 +3,7 @@
 --
 -- Expected result for every row below: rls_enabled = true.
 -- If any table shows false, run the corresponding "enable row level security" + policy
--- SQL from README.md (Admin Access / Restricting Sensor Visibility / Naming Sensors /
--- Sensor Alerts sections) before relying on this app with real users.
+-- SQL from migrations/20261002_monitoring_hardening.sql before relying on the app.
 
 select
   pg_class.relname as table_name,
@@ -37,3 +36,16 @@ from pg_policies
 where schemaname = 'public'
   and tablename in ('sensor_data', 'device_permissions', 'sensor_names', 'alert_rules', 'hvac_events')
 order by tablename, cmd, policyname;
+
+-- Both results must be false: clients must not edit the notification lifecycle.
+select
+  has_column_privilege('authenticated', 'public.alert_rules', 'is_triggered', 'UPDATE') as client_can_change_triggered,
+  has_column_privilege('authenticated', 'public.alert_rules', 'last_notified_at', 'UPDATE') as client_can_change_notified;
+
+-- New constraints are NOT VALID to preserve old data. Repair rows returned here, then
+-- validate alert_rules_threshold_order / alert_rules_threshold_finite explicitly.
+select id, device_id, sensor_index from public.alert_rules
+where (low_f is null and high_f is null)
+  or (low_f is not null and high_f is not null and low_f >= high_f)
+  or high_f::text in ('NaN', 'Infinity', '-Infinity')
+  or low_f::text in ('NaN', 'Infinity', '-Infinity');

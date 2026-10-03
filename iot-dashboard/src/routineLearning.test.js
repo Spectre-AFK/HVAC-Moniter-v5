@@ -40,6 +40,26 @@ describe('buildRoutineProfile', () => {
 });
 
 describe('detectRoutineDeviations', () => {
+  it('does not count today or future events as training history', () => {
+    const now = new Date('2026-09-29T20:00:00');
+    const history = [7, 14, 21].map((days) => eventAt(now, days, 17, 45));
+    expect(detectRoutineDeviations([...history, eventAt(now, 0, 19, 0), eventAt(now, -7, 17, 45)], 'Test', now)).toEqual([]);
+  });
+  it('keeps a midnight-spanning weekday routine near midnight', () => {
+    const now = new Date('2026-09-29T23:59:00');
+    const events = [eventAt(now, 7, 23, 55), eventAt(now, 14, 0, 5), eventAt(now, 21, 23, 58), eventAt(now, 28, 0, 2)];
+    const profile = buildRoutineProfile(events)[now.getDay()];
+    expect(Math.min(profile.medianMinutes, 1440 - profile.medianMinutes)).toBeLessThan(10);
+    expect(profile.madMinutes).toBeLessThan(10);
+  });
+  it('does not declare a late-night routine missing at midday after clock wrapping', () => {
+    const now = new Date('2026-09-29T12:00:00');
+    const events = [eventAt(now, 7, 23, 55), eventAt(now, 14, 0, 5), eventAt(now, 21, 23, 58), eventAt(now, 28, 0, 2)];
+    expect(detectRoutineDeviations(events, 'Test', now).map(flag => flag.type)).toEqual(['routine-ambiguous']);
+  });
+  it('rejects invalid dates explicitly', () => {
+    expect(() => detectRoutineDeviations([{ occurred_at: 'invalid' }], 'Test')).toThrow('Invalid HVAC');
+  });
   it('returns no flags when there is no learned profile for today', () => {
     const now = new Date();
     expect(detectRoutineDeviations([], 'Desk Sensor', now)).toEqual([]);
@@ -53,6 +73,7 @@ describe('detectRoutineDeviations', () => {
       eventAt(now, base, 17, 40),
       eventAt(now, base + 7, 17, 45),
       eventAt(now, base + 14, 17, 50),
+      eventAt(now, base + 21, 17, 45),
     ];
     const todayEvent = eventAt(now, 0, 17, 44);
     const flags = detectRoutineDeviations([...history, todayEvent], 'Desk Sensor', now);
@@ -68,6 +89,7 @@ describe('detectRoutineDeviations', () => {
       eventAt(now, base, 17, 40),
       eventAt(now, base + 7, 17, 45),
       eventAt(now, base + 14, 17, 50),
+      eventAt(now, base + 21, 17, 45),
     ];
     const todayEvent = eventAt(now, 0, 19, 55); // ~2 hours later than usual
     const flags = detectRoutineDeviations([...history, todayEvent], 'Desk Sensor', now);

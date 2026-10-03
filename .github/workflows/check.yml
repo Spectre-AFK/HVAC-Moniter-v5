@@ -1,0 +1,38 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: iot-dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: iot-dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run check
+        env:
+          VITE_SUPABASE_URL: https://example.supabase.co
+          VITE_SUPABASE_ANON_KEY: ci-public-placeholder
+      - run: npm run check:worker
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+      - run: node ../scripts/sync-node-red.mjs
+      - run: git diff --exit-code -- ../node-red/flows.json
+      - run: node --check ../mqtt-bridge/bridge.js
+      - run: npm audit --audit-level=high
+  firmware:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - shell: pwsh
+        run: .\scripts\build-firmware.ps1
