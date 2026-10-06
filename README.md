@@ -160,8 +160,13 @@ a notification. Cron failures are logged and fail the invocation rather than loo
 
 Both ingestion paths preserve probe indices, skip `null` disconnected probes, and reject
 malformed payloads/unsynchronized timestamps rather than substituting the current time.
-Writes are still best-effort: neither bridge has a durable offline queue. MQTT transport
-and the firmware setup portal are not suitable for an untrusted/public network.
+Writes are still best-effort: neither bridge has a durable offline queue. MQTT now uses
+authenticated certificate-verified TLS; follow [the broker rollout](mosquitto/README.md)
+before deploying the updated firmware/ingestion configuration. The firmware setup portal
+remains unsuitable for an untrusted/public network.
+On routers without a working hairpin path, local boards can set an optional private
+LAN destination in the portal while retaining the certificate hostname and verified TLS.
+Remote boards leave that field blank; public DNS and fallback hostnames are unchanged.
 
 ## Deployment and observability
 

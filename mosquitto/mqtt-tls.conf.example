@@ -1,0 +1,13 @@
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+
+listener 8883
+protocol mqtt
+certfile /etc/mosquitto/certs/current/fullchain.pem
+keyfile /etc/mosquitto/certs/current/privkey.pem
+tls_version tlsv1.2
+require_certificate false
+
+# Temporary migration listener only. Remove after every client uses TLS.
+# Never expose this plaintext listener to the Internet after migration.
+# listener 1883

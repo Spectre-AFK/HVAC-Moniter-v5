@@ -28,6 +28,9 @@ jobs:
       - run: node ../scripts/sync-node-red.mjs
       - run: git diff --exit-code -- ../node-red/flows.json
       - run: node --check ../mqtt-bridge/bridge.js
+      - run: bash -n ../mosquitto/deploy-certificate.sh
+      - run: g++ -std=c++11 -Wall -Wextra -Werror "../esp32 code/tests/mqtt_security_test.cpp" -o "$RUNNER_TEMP/mqtt-security-test"
+      - run: '"$RUNNER_TEMP/mqtt-security-test"'
       - run: npm audit --audit-level=high
   firmware:
     runs-on: windows-latest

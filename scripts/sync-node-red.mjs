@@ -3,13 +3,15 @@ import { fileURLToPath } from 'node:url';
 
 const flowPath = fileURLToPath(new URL('../node-red/flows.json', import.meta.url));
 const source = readFileSync(new URL('../shared/readingPayload.js', import.meta.url), 'utf8')
+  .replaceAll('\r\n', '\n')
   .replaceAll('export ', '')
   .replace('new TextEncoder().encode(rawPayload).length', "Buffer.byteLength(rawPayload, 'utf8')");
 const flow = JSON.parse(readFileSync(flowPath, 'utf8'));
 flow.find((node) => node.type === 'tab').info =
   'MQTT -> Supabase ingestion. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the Node-RED process environment. ' +
   'Payload validation is generated from shared/readingPayload.js; regenerate with node scripts/sync-node-red.mjs. ' +
-  'Configure broker credentials in the MQTT broker node Security tab. Writes are best-effort, not durably queued.';
+  'Broker uses mqtt.checkmytemp.com:8883 with certificate verification. Configure credentials in its Security tab. ' +
+  'Writes are best-effort, not durably queued.';
 flow.find((node) => node.name === 'Format for Supabase').func = `${source}
 try {
     const rows = parseReadingRows(JSON.stringify(msg.payload));

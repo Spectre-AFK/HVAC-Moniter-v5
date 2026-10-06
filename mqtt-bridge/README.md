@@ -28,8 +28,8 @@ npm start
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `MQTT_URL` | Yes | e.g. `mqtt://192.168.0.132:1883` — must match the server/port the ESP32 boards are configured with |
-| `MQTT_USERNAME` / `MQTT_PASSWORD` | If broker requires auth | Leave blank for an unauthenticated broker (not recommended — see below) |
+| `MQTT_URL` | Yes | `mqtts://mqtt.checkmytemp.com:8883` — certificate DNS hostname; raw IPs/plaintext URLs are rejected |
+| `MQTT_USERNAME` / `MQTT_PASSWORD` | Yes | Authenticated broker credentials in separate variables, never embedded in the URL |
 | `MQTT_TOPIC` | No (default `home/sensors/temp`) | Must match `MQTT_TOPIC` in [../esp32 code/config.h](../esp32%20code/config.h) |
 | `SUPABASE_URL` | Yes | Your Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | Project Settings → API → service_role key. **Never** put this in a browser-facing app — it bypasses RLS. |
@@ -39,6 +39,12 @@ npm start
 Without a username/password, any device that can reach the broker can publish fake readings
 or read every sensor's data. Configure your broker (e.g. Mosquitto) to require auth, then set
 `MQTT_USERNAME`/`MQTT_PASSWORD` here and on each ESP32 via its captive portal setup page.
+
+The bridge requires TLS 1.2 or newer and verifies the server certificate/hostname using
+Node.js's public CA trust store. It never sets `rejectUnauthorized: false`.
+Follow [the broker rollout](../mosquitto/README.md), update old `.env` URLs to `mqtts://`,
+and keep Node.js CA trust current. A hosts/DNS override can route the hostname locally
+without disabling certificate verification.
 
 ## Behavior
 

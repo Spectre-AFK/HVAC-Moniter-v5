@@ -1,4 +1,4 @@
-// Bridges the local MQTT broker (that the ESP32 boards publish to — see esp32 code/main.ino)
+// Bridges the local MQTT broker (that the ESP32 boards publish to — see esp32 code/hvac_sensor.ino)
 // into Supabase's `sensor_data` table. Run this as a long-lived process on any machine that
 // can reach both the MQTT broker (usually the same LAN) and the internet (for Supabase).
 //
@@ -7,6 +7,7 @@ import 'dotenv/config';
 import mqtt from 'mqtt';
 import { parseReadingRows } from '../shared/readingPayload.js';
 import { insertReadings, describeBrokerUrl } from './ingestion.js';
+import { mqttOptions } from './mqttOptions.js';
 
 const {
   MQTT_URL,
@@ -25,18 +26,18 @@ for (const [name, value] of Object.entries({ MQTT_URL, SUPABASE_URL, SUPABASE_SE
 }
 
 let brokerDescription;
+let options;
 try {
+  options = mqttOptions({ MQTT_URL, MQTT_USERNAME, MQTT_PASSWORD });
   brokerDescription = describeBrokerUrl(MQTT_URL);
-} catch {
-  console.error('Invalid MQTT_URL. Use a broker URL such as mqtt://host:1883.');
+} catch (error) {
+  console.error(`Invalid MQTT configuration: ${error.message}`);
   process.exit(1);
 }
 
 const client = mqtt.connect(MQTT_URL, {
-  username: MQTT_USERNAME || undefined,
-  password: MQTT_PASSWORD || undefined,
+  ...options,
   clientId: `hvac-mqtt-bridge-${Math.random().toString(16).slice(2)}`,
-  reconnectPeriod: 5000,
 });
 
 client.on('connect', () => {

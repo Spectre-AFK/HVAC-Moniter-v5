@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <LittleFS.h>
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
@@ -11,12 +12,14 @@
 #include <DallasTemperature.h>
 #include <time.h>
 #include "config.h"
+#include "mqtt_security.h"
+#include "mqtt_trust.h"
 
 // Initialize Global Config with defaults
-Config appConfig = { "192.168.0.132", 1883, "", "", 1, true, "" };
+Config appConfig = { "mqtt.checkmytemp.com", 8883, "", "", 1, true, "", "" };
 
 // Global Objects
-WiFiClient espClient;
+WiFiClientSecure espClient;
 PubSubClient mqttClient(espClient);
 // Unique per-device identifier (derived from MAC), used as both the MQTT client ID and payload device_id
 String deviceId;
@@ -54,13 +57,21 @@ void loadConfig() {
       if (file) {
         JsonDocument doc;
         if (deserializeJson(doc, file) == DeserializationError::Ok) {
-          strlcpy(appConfig.mqtt_server, doc["mqtt_server"] | "192.168.0.132", sizeof(appConfig.mqtt_server));
-          appConfig.mqtt_port = doc["mqtt_port"] | 1883;
+          strlcpy(appConfig.mqtt_server, doc["mqtt_server"] | MqttSecurity::DEFAULT_HOST, sizeof(appConfig.mqtt_server));
+          appConfig.mqtt_port = doc["mqtt_port"] | MqttSecurity::DEFAULT_PORT;
           strlcpy(appConfig.mqtt_username, doc["mqtt_username"] | "", sizeof(appConfig.mqtt_username));
           strlcpy(appConfig.mqtt_password, doc["mqtt_password"] | "", sizeof(appConfig.mqtt_password));
           appConfig.sensor_count = doc["sensor_count"] | 1;
           appConfig.has_display = doc["has_display"] | true;
           strlcpy(appConfig.mqtt_fallback_server, doc["mqtt_fallback_server"] | "", sizeof(appConfig.mqtt_fallback_server));
+          const char* lanIp = doc["mqtt_lan_ip"] | "";
+          if (strlen(lanIp) >= sizeof(appConfig.mqtt_lan_ip) ||
+              (!doc["mqtt_lan_ip"].isNull() && !doc["mqtt_lan_ip"].is<const char*>())) {
+            Serial.println("Invalid saved LAN destination; reopen setup to correct it.");
+            strlcpy(appConfig.mqtt_lan_ip, "invalid", sizeof(appConfig.mqtt_lan_ip));
+          } else {
+            strlcpy(appConfig.mqtt_lan_ip, lanIp, sizeof(appConfig.mqtt_lan_ip));
+          }
           Serial.println("Config loaded from LittleFS");
         } else {
           Serial.println("Invalid config JSON; using defaults.");
@@ -78,12 +89,19 @@ void loadConfig() {
     appConfig.sensor_count = constrain(appConfig.sensor_count, 1, MAX_SENSORS);
   }
   if (appConfig.mqtt_port < 1 || appConfig.mqtt_port > 65535) {
-    Serial.println("Invalid saved MQTT port; using 1883.");
-    appConfig.mqtt_port = 1883;
+    Serial.println("Invalid saved MQTT port; using TLS port 8883.");
+    appConfig.mqtt_port = MqttSecurity::DEFAULT_PORT;
   }
   if (strlen(appConfig.mqtt_server) == 0) {
     Serial.println("Empty saved MQTT server; using local default.");
-    strlcpy(appConfig.mqtt_server, "192.168.0.132", sizeof(appConfig.mqtt_server));
+    strlcpy(appConfig.mqtt_server, MqttSecurity::DEFAULT_HOST, sizeof(appConfig.mqtt_server));
+  }
+  if (!MqttSecurity::validHostname(appConfig.mqtt_server) || !MqttSecurity::validPort(appConfig.mqtt_port)) {
+    Serial.println("Saved MQTT settings are not TLS-compatible. Hold BOOT for setup: use a certificate hostname and TLS port.");
+  }
+  unsigned char lanAddress[4];
+  if (appConfig.mqtt_lan_ip[0] != '\0' && !MqttSecurity::parseLanAddress(appConfig.mqtt_lan_ip, lanAddress)) {
+    Serial.println("Saved LAN destination is not a valid private IPv4 address. Hold BOOT to correct it or leave it blank.");
   }
 }
 
@@ -96,6 +114,7 @@ void saveConfig() {
   doc["sensor_count"] = appConfig.sensor_count;
   doc["has_display"] = appConfig.has_display;
   doc["mqtt_fallback_server"] = appConfig.mqtt_fallback_server;
+  doc["mqtt_lan_ip"] = appConfig.mqtt_lan_ip;
 
   const char* temporaryFile = "/config.tmp";
   File file = LittleFS.open(temporaryFile, "w");
@@ -236,15 +255,17 @@ void runConfigPortal(bool forcePortal) {
   wm.setSaveParamsCallback(saveConfigCallback);
   wm.setConfigPortalTimeout(180);
 
-  WiFiManagerParameter custom_mqtt_server("server", "MQTT Server IP (local, tried first)", appConfig.mqtt_server, 39);
-  WiFiManagerParameter custom_mqtt_fallback("fallback", "MQTT Fallback IP/host (blank if none)", appConfig.mqtt_fallback_server, 39);
+  WiFiManagerParameter custom_mqtt_server("server", "MQTT TLS hostname (not an IP or URL)", appConfig.mqtt_server, 253);
+  WiFiManagerParameter custom_mqtt_fallback("fallback", "MQTT fallback TLS hostname (blank if none)", appConfig.mqtt_fallback_server, 253);
+  WiFiManagerParameter custom_mqtt_lan_ip("lan_ip", "MQTT LAN destination IPv4 (optional, primary only)", appConfig.mqtt_lan_ip, 15);
 
   char portStr[6];
   itoa(appConfig.mqtt_port, portStr, 10);
-  WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", portStr, 5);
+  WiFiManagerParameter custom_mqtt_port("port", "MQTT TLS port (normally 8883; not 1883)", portStr, 5);
 
-  WiFiManagerParameter custom_mqtt_username("mqtt_user", "MQTT Username (blank if none)", appConfig.mqtt_username, 31);
-  WiFiManagerParameter custom_mqtt_password("mqtt_pass", "MQTT Password (blank if none)", appConfig.mqtt_password, 31);
+  WiFiManagerParameter custom_mqtt_username("mqtt_user", "MQTT Username (required)", appConfig.mqtt_username, 31);
+  WiFiManagerParameter custom_mqtt_password("mqtt_pass", "MQTT Password (required)", appConfig.mqtt_password, 31,
+    "type=\"password\"");
 
   char countStr[4];
   itoa(appConfig.sensor_count, countStr, 10);
@@ -255,6 +276,7 @@ void runConfigPortal(bool forcePortal) {
   WiFiManagerParameter custom_has_display("display", "Has OLED Display (1=yes, 0=no)", displayStr, 2);
 
   wm.addParameter(&custom_mqtt_server);
+  wm.addParameter(&custom_mqtt_lan_ip);
   wm.addParameter(&custom_mqtt_fallback);
   wm.addParameter(&custom_mqtt_port);
   wm.addParameter(&custom_mqtt_username);
@@ -280,19 +302,27 @@ void runConfigPortal(bool forcePortal) {
   }
 
   if (shouldSaveConfig) {
+    const char* lanIp = custom_mqtt_lan_ip.getValue();
+    unsigned char lanAddress[4];
+    if (lanIp[0] != '\0' && !MqttSecurity::parseLanAddress(lanIp, lanAddress)) {
+      Serial.println("Invalid LAN destination: enter a private IPv4 address or leave it blank. MQTT settings were not saved.");
+      showStatus("Setup error", "Invalid LAN destination", "MQTT settings not saved", "Reopen setup to correct");
+      return;
+    }
     strlcpy(appConfig.mqtt_server, custom_mqtt_server.getValue(), sizeof(appConfig.mqtt_server));
     if (strlen(appConfig.mqtt_server) == 0) {
       Serial.println("Empty portal MQTT server; using local default.");
-      strlcpy(appConfig.mqtt_server, "192.168.0.132", sizeof(appConfig.mqtt_server));
+      strlcpy(appConfig.mqtt_server, MqttSecurity::DEFAULT_HOST, sizeof(appConfig.mqtt_server));
     }
     strlcpy(appConfig.mqtt_fallback_server, custom_mqtt_fallback.getValue(), sizeof(appConfig.mqtt_fallback_server));
     appConfig.mqtt_port = atoi(custom_mqtt_port.getValue());
     if (appConfig.mqtt_port < 1 || appConfig.mqtt_port > 65535) {
-      Serial.println("Invalid portal MQTT port; retaining standard port 1883.");
-      appConfig.mqtt_port = 1883;
+      Serial.println("Invalid portal MQTT port; using TLS port 8883.");
+      appConfig.mqtt_port = MqttSecurity::DEFAULT_PORT;
     }
     strlcpy(appConfig.mqtt_username, custom_mqtt_username.getValue(), sizeof(appConfig.mqtt_username));
     strlcpy(appConfig.mqtt_password, custom_mqtt_password.getValue(), sizeof(appConfig.mqtt_password));
+    strlcpy(appConfig.mqtt_lan_ip, lanIp, sizeof(appConfig.mqtt_lan_ip));
     const int configuredCount = atoi(custom_sensor_count.getValue());
     if (configuredCount < 1 || configuredCount > MAX_SENSORS) {
       Serial.println("Invalid portal sensor count; clamping to supported range.");
@@ -328,19 +358,61 @@ void checkConfigButton() {
 // ---------------------------------------------------------
 // MQTT RECONNECT
 // ---------------------------------------------------------
-// Tries one broker; returns true on success. Sends credentials only if a username is configured
-// (an empty username means the broker has no auth).
+// Credentials are sent only after the secure client verifies the chain and DNS hostname.
+void logTlsError() {
+  char tlsError[160];
+  const int tlsCode = espClient.lastError(tlsError, sizeof(tlsError));
+  if (MqttSecurity::isTlsFailure(tlsCode)) Serial.printf("TLS error %d: %s\n", tlsCode, tlsError);
+}
+
 bool tryConnect(const char* server) {
+  if (!MqttSecurity::validHostname(server) || !MqttSecurity::validPort(appConfig.mqtt_port)) {
+    Serial.println("MQTT connection refused: use a valid DNS hostname and TLS port, not a raw IP or port 1883.");
+    return false;
+  }
+  if (strlen(appConfig.mqtt_username) == 0 || strlen(appConfig.mqtt_password) == 0) {
+    Serial.println("MQTT connection refused: configure broker username and password in setup.");
+    return false;
+  }
+  if (!MqttSecurity::clockReady(time(nullptr))) {
+    Serial.println("Waiting for NTP before verifying the MQTT certificate.");
+    return false;
+  }
   Serial.printf("Attempting MQTT connection to %s:%d...", server, appConfig.mqtt_port);
   showStatus("Loading...", "Connecting to MQTT", server, "");
   mqttClient.setServer(server, appConfig.mqtt_port);
-  bool connected = strlen(appConfig.mqtt_username) > 0
-    ? mqttClient.connect(deviceId.c_str(), appConfig.mqtt_username, appConfig.mqtt_password)
-    : mqttClient.connect(deviceId.c_str());
+  if (MqttSecurity::usesLanDestination(server, appConfig.mqtt_server, appConfig.mqtt_lan_ip)) {
+    unsigned char address[4];
+    if (!MqttSecurity::parseLanAddress(appConfig.mqtt_lan_ip, address)) {
+      Serial.println("MQTT connection refused: the configured LAN destination is invalid. Correct it in setup.");
+      return false;
+    }
+    const IPAddress destination(address[0], address[1], address[2], address[3]);
+    Serial.printf("\nRouting TLS to LAN %s:%d; verifying certificate hostname %s.\n",
+      appConfig.mqtt_lan_ip, appConfig.mqtt_port, server);
+    // PubSubClient completes MQTT CONNECT over this verified transport without reconnecting by DNS.
+    if (!espClient.connected() &&
+        !espClient.connect(destination, appConfig.mqtt_port, server, MQTT_ROOT_CA, nullptr, nullptr)) {
+      Serial.println("LAN TLS connection failed before MQTT authentication.");
+      logTlsError();
+      return false;
+    }
+  }
+  const bool connected = mqttClient.connect(deviceId.c_str(), appConfig.mqtt_username, appConfig.mqtt_password);
   if (connected) {
     Serial.println("connected");
   } else {
-    Serial.printf("failed, rc=%d\n", mqttClient.state());
+    const int state = mqttClient.state();
+    Serial.printf("failed, rc=%d\n", state);
+    if (MqttSecurity::isBrokerRejection(state)) {
+      if (state == MQTT_CONNECT_BAD_CREDENTIALS || state == MQTT_CONNECT_UNAUTHORIZED) {
+        Serial.println("MQTT authentication rejected: check the Mosquitto account, matching password and authorization.");
+      } else {
+        Serial.println("MQTT broker rejected CONNECT after TLS succeeded. Check the broker log.");
+      }
+    } else {
+      logTlsError();
+    }
   }
   return connected;
 }
@@ -392,6 +464,8 @@ void setup() {
     }
   }
   WiFi.setAutoReconnect(true);
+  espClient.setCACert(MQTT_ROOT_CA);
+  espClient.setHandshakeTimeout(10);
   espClient.setConnectionTimeout(2000);
   mqttClient.setSocketTimeout(2);
   if (!mqttClient.setBufferSize(512)) Serial.println("MQTT buffer allocation failed.");

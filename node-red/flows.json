@@ -4,7 +4,7 @@
         "type": "tab",
         "label": "v2",
         "disabled": false,
-        "info": "MQTT -> Supabase ingestion. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the Node-RED process environment. Payload validation is generated from shared/readingPayload.js; regenerate with node scripts/sync-node-red.mjs. Configure broker credentials in the MQTT broker node Security tab. Writes are best-effort, not durably queued.",
+        "info": "MQTT -> Supabase ingestion. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the Node-RED process environment. Payload validation is generated from shared/readingPayload.js; regenerate with node scripts/sync-node-red.mjs. Broker uses mqtt.checkmytemp.com:8883 with certificate verification. Configure credentials in its Security tab. Writes are best-effort, not durably queued.",
         "env": []
     },
     {
@@ -12,7 +12,7 @@
         "type": "function",
         "z": "7b42637342905f3d",
         "name": "Format for Supabase",
-        "func": "const MAX_PAYLOAD_BYTES = 16_384;\r\n\r\nfunction parseReadingRows(rawPayload, now = Date.now()) {\r\n  if (typeof rawPayload !== 'string' || Buffer.byteLength(rawPayload, 'utf8') > MAX_PAYLOAD_BYTES) {\r\n    throw new TypeError('MQTT payload must be a string of at most 16 KiB.');\r\n  }\r\n  const msg = JSON.parse(rawPayload);\r\n  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {\r\n    throw new TypeError('MQTT payload must be an object.');\r\n  }\r\n  const { device_id, timestamp, temperatures } = msg;\r\n  if (typeof device_id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(device_id)) {\r\n    throw new TypeError('device_id must contain 1-128 letters, numbers, underscores or hyphens.');\r\n  }\r\n  const milliseconds = timestamp * 1000;\r\n  if (!Number.isFinite(timestamp) || timestamp < 946684800 ||\r\n      !Number.isFinite(milliseconds) || milliseconds > now + 300_000) {\r\n    throw new TypeError('timestamp must be epoch seconds from a synchronized clock, not in the future.');\r\n  }\r\n  if (!Array.isArray(temperatures) || temperatures.length === 0 || temperatures.length > 64) {\r\n    throw new TypeError('temperatures must contain 1-64 probe positions.');\r\n  }\r\n  const isoTimestamp = new Date(milliseconds).toISOString();\r\n  const rows = [];\r\n  temperatures.forEach((temperature_c, sensor_index) => {\r\n    if (temperature_c === null) return;\r\n    if (!Number.isFinite(temperature_c) || temperature_c < -55 || temperature_c > 125) {\r\n      throw new TypeError(`Invalid DS18B20 temperature at probe ${sensor_index}.`);\r\n    }\r\n    rows.push({ device_id, sensor_index, temperature_c, timestamp: isoTimestamp });\r\n  });\r\n  return rows;\r\n}\r\n\ntry {\n    const rows = parseReadingRows(JSON.stringify(msg.payload));\n    if (rows.length === 0) return null;\n    const baseUrl = env.get('SUPABASE_URL');\n    const key = env.get('SUPABASE_SERVICE_ROLE_KEY');\n    if (!baseUrl || !key) throw new Error('Missing Supabase ingestion environment variables.');\n    msg.url = baseUrl.replace(/\\/$/, '') + '/rest/v1/sensor_data';\n    msg.headers = {\n        apikey: key,\n        Authorization: 'Bearer ' + key,\n        'Content-Type': 'application/json',\n        Prefer: 'return=minimal'\n    };\n    msg.payload = rows;\n    return msg;\n} catch (error) {\n    node.error('MQTT ingestion rejected: ' + error.message, msg);\n    return null;\n}",
+        "func": "const MAX_PAYLOAD_BYTES = 16_384;\n\nfunction parseReadingRows(rawPayload, now = Date.now()) {\n  if (typeof rawPayload !== 'string' || Buffer.byteLength(rawPayload, 'utf8') > MAX_PAYLOAD_BYTES) {\n    throw new TypeError('MQTT payload must be a string of at most 16 KiB.');\n  }\n  const msg = JSON.parse(rawPayload);\n  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {\n    throw new TypeError('MQTT payload must be an object.');\n  }\n  const { device_id, timestamp, temperatures } = msg;\n  if (typeof device_id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(device_id)) {\n    throw new TypeError('device_id must contain 1-128 letters, numbers, underscores or hyphens.');\n  }\n  const milliseconds = timestamp * 1000;\n  if (!Number.isFinite(timestamp) || timestamp < 946684800 ||\n      !Number.isFinite(milliseconds) || milliseconds > now + 300_000) {\n    throw new TypeError('timestamp must be epoch seconds from a synchronized clock, not in the future.');\n  }\n  if (!Array.isArray(temperatures) || temperatures.length === 0 || temperatures.length > 64) {\n    throw new TypeError('temperatures must contain 1-64 probe positions.');\n  }\n  const isoTimestamp = new Date(milliseconds).toISOString();\n  const rows = [];\n  temperatures.forEach((temperature_c, sensor_index) => {\n    if (temperature_c === null) return;\n    if (!Number.isFinite(temperature_c) || temperature_c < -55 || temperature_c > 125) {\n      throw new TypeError(`Invalid DS18B20 temperature at probe ${sensor_index}.`);\n    }\n    rows.push({ device_id, sensor_index, temperature_c, timestamp: isoTimestamp });\n  });\n  return rows;\n}\n\ntry {\n    const rows = parseReadingRows(JSON.stringify(msg.payload));\n    if (rows.length === 0) return null;\n    const baseUrl = env.get('SUPABASE_URL');\n    const key = env.get('SUPABASE_SERVICE_ROLE_KEY');\n    if (!baseUrl || !key) throw new Error('Missing Supabase ingestion environment variables.');\n    msg.url = baseUrl.replace(/\\/$/, '') + '/rest/v1/sensor_data';\n    msg.headers = {\n        apikey: key,\n        Authorization: 'Bearer ' + key,\n        'Content-Type': 'application/json',\n        Prefer: 'return=minimal'\n    };\n    msg.payload = rows;\n    return msg;\n} catch (error) {\n    node.error('MQTT ingestion rejected: ' + error.message, msg);\n    return null;\n}",
         "outputs": 1,
         "timeout": "",
         "noerr": 0,
@@ -109,12 +109,14 @@
     {
         "id": "mqtt_broker",
         "type": "mqtt-broker",
-        "name": "Local Pi Broker",
-        "broker": "localhost",
-        "port": "1883",
+        "name": "Pi Broker (verified TLS)",
+        "broker": "mqtt.checkmytemp.com",
+        "port": "8883",
         "clientid": "",
         "autoConnect": true,
-        "usetls": false,
+        "usetls": true,
+        "verifyservercert": true,
+        "tls": "mqtt_tls",
         "protocolVersion": "4",
         "keepalive": "60",
         "cleansession": true,
@@ -136,5 +138,20 @@
         "willMsg": {},
         "userProps": "",
         "sessionExpiry": ""
+    },
+    {
+        "id": "mqtt_tls",
+        "type": "tls-config",
+        "name": "MQTT certificate verification",
+        "certType": "files",
+        "cert": "",
+        "key": "",
+        "ca": "",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "mqtt.checkmytemp.com",
+        "verifyservercert": true,
+        "alpnprotocol": ""
     }
 ]

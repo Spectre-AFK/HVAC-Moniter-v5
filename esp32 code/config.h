@@ -28,13 +28,14 @@ const uint8_t ONE_WIRE_PINS[MAX_SENSORS] = {4, 5, 16, 17, 18};
 // CONFIGURATION STRUCTURE
 // ---------------------------------------------------------
 struct Config {
-  char mqtt_server[40];
+  char mqtt_server[254];
   int mqtt_port;
-  char mqtt_username[32]; // leave blank if the broker doesn't require auth
+  char mqtt_username[32];
   char mqtt_password[32];
   int sensor_count;
   bool has_display; // set false for boards with no OLED wired up
-  char mqtt_fallback_server[40]; // tried when mqtt_server (local broker) is unreachable; blank to disable
+  char mqtt_fallback_server[254]; // optional certificate-verified DNS hostname; uses the same TLS port
+  char mqtt_lan_ip[16]; // optional private IPv4 destination for the primary hostname only
 };
 
 // Define global configuration object
