@@ -1,88 +1,10 @@
-import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import React from 'react';
 import {
-  Thermometer, Activity, BellRing, Radio, Phone, Mail, ArrowRight, AlertTriangle, Users,
+  Activity, BellRing, Radio, Phone, Mail, ArrowRight, Users,
   TrendingUp, Repeat, Clock, Cpu, MailCheck, ShieldCheck
 } from 'lucide-react';
 import ThemeToggle from './ThemeToggle';
-const DemoChart = lazy(() => import('./DemoChart'));
-
-// Simulated sensors for the marketing demo — no real data, no login required.
-// Each scenario swaps in different sensor readings so visitors can see what the dashboard
-// looks like both on a normal day and when something actually needs attention.
-// Per-sensor safe range used to color-code cards and the chart threshold line below —
-// deliberately per sensor (not one universal hot/cold split) so a cooler warming into the
-// 50s still reads as "out of range" even though 58°F alone isn't objectively hot.
-const SCENARIOS = [
-  {
-    key: 'normal',
-    label: 'A Normal Day',
-    sensors: [
-      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 5, safeMin: 65, safeMax: 85, color: '#f59e0b' },
-      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, safeMin: 60, safeMax: 75, color: '#3b82f6' },
-      { id: 2, name: 'Walk-in Cooler', base: 38, amplitude: 3, safeMin: 33, safeMax: 45, color: '#10b981' },
-    ],
-    alert: null,
-  },
-  {
-    key: 'cooler',
-    label: 'Walk-in Cooler Too Warm',
-    sensors: [
-      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 5, safeMin: 65, safeMax: 85, color: '#f59e0b' },
-      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, safeMin: 60, safeMax: 75, color: '#3b82f6' },
-      { id: 2, name: 'Walk-in Cooler', base: 58, amplitude: 4, safeMin: 33, safeMax: 45, color: '#10b981' },
-    ],
-    alert: {
-      title: 'Example: 1 Sensor Needs Attention',
-      affectedSensorId: 2,
-      message: '"Walk-in Cooler" has been trending warmer over the last hour — often a sign a door was left open. ' +
-        'With a configured threshold alert, you\'d get an email after the next five-minute check.',
-    },
-  },
-  {
-    key: 'drift',
-    label: 'Long-Term Drift Analysis',
-    sensors: [
-      { id: 0, name: 'Rooftop Unit 1', base: 74, amplitude: 3, drift: 0.15, driftCap: 10, safeMin: 65, safeMax: 85, color: '#f59e0b' },
-      { id: 1, name: 'Server Closet', base: 68, amplitude: 2.5, safeMin: 60, safeMax: 75, color: '#3b82f6' },
-      { id: 2, name: 'Walk-in Cooler', base: 38, amplitude: 3, safeMin: 33, safeMax: 45, color: '#10b981' },
-    ],
-    alert: {
-      title: 'Example: 1 Sensor Needs Attention',
-      affectedSensorId: 0,
-      message: '"Rooftop Unit 1" hasn\'t crossed any threshold yet, but its average has been quietly climbing for ' +
-        'days — the kind of slow drift a daily glance would miss. Long-term trend analysis catches it early, ' +
-        'often weeks before it turns into a hard failure.',
-    },
-  },
-];
-
-const HISTORY_LENGTH = 20;
-function demoValues(sensors, tick) {
-  const values = {};
-  for (const sensor of sensors) {
-    const wave = Math.sin((tick + sensor.id * 3) / 4) * sensor.amplitude;
-    const jitter = Math.sin(tick * 2.37 + sensor.id) * (sensor.jitter ?? 0.6) / 2;
-    const drift = sensor.drift ? Math.min(sensor.drift * tick, sensor.driftCap ?? Infinity) : 0;
-    values[sensor.id] = sensor.base + wave + jitter + drift;
-  }
-  return values;
-}
-
-// Status is relative to each sensor's own safe range, not one universal hot/cold split —
-// a cooler that's crept up to 58°F is just as "out of range" as a rooftop unit at 95°F.
-const getStatusColor = (tempF, sensor) => {
-  if (tempF > sensor.safeMax) return 'text-red-500 dark:text-red-400';
-  if (tempF < sensor.safeMin) return 'text-blue-500 dark:text-blue-400';
-  return 'text-emerald-500 dark:text-emerald-400';
-};
-
-const getStatusBg = (tempF, sensor) => {
-  if (tempF > sensor.safeMax) return 'bg-red-50 border-red-200 dark:bg-red-950/40 dark:border-red-900';
-  if (tempF < sensor.safeMin) return 'bg-blue-50 border-blue-200 dark:bg-blue-950/40 dark:border-blue-900';
-  return 'bg-emerald-50 border-emerald-200 dark:bg-emerald-950/30 dark:border-emerald-900';
-};
-
-const isOutOfRange = (tempF, sensor) => tempF > sensor.safeMax || tempF < sensor.safeMin;
+import LiveDemo from './LiveDemo';
 
 const FEATURES = [
   {
@@ -135,79 +57,7 @@ const HOW_IT_WORKS = [
   },
 ];
 
-function DemoSensorCard({ sensor, value }) {
-  const outOfRange = isOutOfRange(value, sensor);
-  return (
-    <div className={`rounded-2xl p-6 border shadow-sm transition-colors ${getStatusBg(value, sensor)} ${outOfRange ? 'ring-2 ring-red-400/60 dark:ring-red-500/50' : ''}`}>
-      <div className="flex justify-between items-start mb-4">
-        <div className="flex items-center gap-2">
-          <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: sensor.color }} />
-          <Thermometer className={`w-5 h-5 ${getStatusColor(value, sensor)}`} />
-          <span className="font-semibold text-slate-900 dark:text-slate-100">{sensor.name}</span>
-        </div>
-        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium ${
-          outOfRange
-            ? 'bg-red-100 border-red-300 text-red-700 dark:bg-red-950/60 dark:border-red-800 dark:text-red-300'
-            : 'bg-white/60 border-slate-200/50 text-slate-600 dark:bg-slate-800/60 dark:border-slate-700/50 dark:text-slate-300'
-        }`}>
-          <span className={`w-2 h-2 rounded-full animate-pulse ${outOfRange ? 'bg-red-500' : 'bg-emerald-500'}`}></span>
-          {outOfRange ? 'OUT OF RANGE' : 'LIVE'}
-        </div>
-      </div>
-      <div className="flex items-baseline gap-2">
-        <span className={`text-5xl font-extrabold tracking-tighter ${getStatusColor(value, sensor)}`}>
-          {value.toFixed(1)}°
-        </span>
-        <span className="text-xl font-bold text-slate-400 dark:text-slate-500">F</span>
-      </div>
-      <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">Safe range: {sensor.safeMin}°–{sensor.safeMax}°F</p>
-    </div>
-  );
-}
-
 export default function LandingPage({ onSignIn, companyName, companyPhone, companyPhoneHref, companyEmail, logo, isDark, onToggleTheme }) {
-  const [tick, setTick] = useState(0);
-  const [startedAt, setStartedAt] = useState(() => Date.now());
-  const [loadChart, setLoadChart] = useState(false);
-  const chartRef = useRef(null);
-  const [scenarioKey, setScenarioKey] = useState(SCENARIOS[0].key);
-  const scenario = SCENARIOS.find((s) => s.key === scenarioKey) ?? SCENARIOS[0];
-  const demoSensors = scenario.sensors;
-
-  // Advances the simulated waveform so the demo dashboard visibly "breathes" like a live feed
-  useEffect(() => {
-    const interval = setInterval(() => setTick((t) => t + 1), 2000);
-    return () => clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(([entry]) => {
-      if (entry.isIntersecting) {
-        setLoadChart(true);
-        observer.disconnect();
-      }
-    }, { rootMargin: '400px' });
-    observer.observe(chartRef.current);
-    return () => observer.disconnect();
-  }, []);
-
-  const liveValues = demoValues(demoSensors, tick);
-  const history = useMemo(() => Array.from({ length: Math.min(tick + 1, HISTORY_LENGTH) }, (_, i) => {
-    const sampleTick = Math.max(0, tick - HISTORY_LENGTH + 1) + i;
-    const values = {};
-    const sampleValues = demoValues(demoSensors, sampleTick);
-    for (const sensor of demoSensors) {
-      values[`sensor${sensor.id}`] = Number(sampleValues[sensor.id].toFixed(1));
-    }
-    return { time: new Date(startedAt + sampleTick * 2000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), ...values };
-  }), [tick, demoSensors, startedAt]);
-
-  // The sensor called out in the active scenario's alert, used to highlight its line and
-  // draw its safe-range threshold on the chart so the breach is visible, not just implied.
-  const alertSensor = scenario.alert
-    ? demoSensors.find((s) => s.id === scenario.alert.affectedSensorId)
-    : null;
-
   const scrollToDemo = () => {
     document.getElementById('live-demo')?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -315,63 +165,11 @@ export default function LandingPage({ onSignIn, companyName, companyPhone, compa
           </div>
           <h2 className="text-3xl font-bold text-slate-900 dark:text-slate-100">Try the dashboard yourself</h2>
           <p className="mt-3 text-slate-500 dark:text-slate-400 max-w-xl mx-auto">
-            This preview updates every few seconds with simulated readings so you can see exactly what your team
-            will get after signing in.
+            Pick an example and watch a few hours of simulated readings replay in seconds, including the alert
+            emails your team would get.
           </p>
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
-            {SCENARIOS.map((s) => (
-              <button
-                key={s.key}
-                onClick={() => {
-                  setScenarioKey(s.key);
-                  setTick(0);
-                  setStartedAt(Date.now());
-                }}
-                aria-pressed={s.key === scenarioKey}
-                className={`px-3.5 py-1.5 rounded-full text-sm font-medium border transition-colors ${
-                  s.key === scenarioKey
-                    ? 'bg-slate-900 text-white border-slate-900 dark:bg-amber-500 dark:text-slate-900 dark:border-amber-500'
-                    : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
-                }`}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
         </div>
-
-        <div className="space-y-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {demoSensors.map((sensor) => (
-              <DemoSensorCard key={sensor.id} sensor={sensor} value={liveValues[sensor.id] ?? sensor.base} />
-            ))}
-          </div>
-
-          <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm">
-            <h3 className="font-semibold text-slate-900 dark:text-slate-100 mb-6">Live Trend Preview</h3>
-            <div ref={chartRef} className="h-72 w-full">
-              {loadChart && <Suspense fallback={<p role="status">Loading demo chart...</p>}>
-                <DemoChart history={history} sensors={demoSensors} alertSensor={alertSensor} isDark={isDark} />
-              </Suspense>}
-            </div>
-          </div>
-
-          {/* Illustrates how anomaly detection + email alerts look together, in plain language */}
-          <div className={`rounded-2xl p-6 border shadow-sm ${scenario.alert ? 'bg-white dark:bg-slate-900 border-amber-200 dark:border-amber-900/60' : 'bg-white dark:bg-slate-900 border-emerald-200 dark:border-emerald-900/60'}`}>
-            <div className="flex items-center gap-2">
-              <AlertTriangle className={`w-5 h-5 ${scenario.alert ? 'text-amber-500' : 'text-emerald-500'}`} />
-              <h3 className="font-semibold text-slate-900 dark:text-slate-100">
-                {scenario.alert ? scenario.alert.title : 'Example: All Sensors Normal'}
-              </h3>
-            </div>
-            <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
-              {scenario.alert
-                ? scenario.alert.message
-                : 'Every sensor is reading within its safe range, so there\'s nothing to do here — that\'s the goal. ' +
-                  'Try one of the other examples above to see what it looks like when something needs attention.'}
-            </p>
-          </div>
-        </div>
+        <LiveDemo isDark={isDark} />
       </section>
 
       {/* CTA */}
