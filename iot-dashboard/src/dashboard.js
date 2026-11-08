@@ -53,3 +53,26 @@ export function sensorStaleness(dashboard, isLive, now) {
     return [sensor.key, { isStale: msSinceLastReading > threshold, msSinceLastReading }];
   }));
 }
+
+const SEVERITY_RANK = { high: 3, medium: 2, low: 1 };
+// Among equally severe flags, problems outrank informational notes, and the
+// "not enough samples" caveat is the least useful thing to show.
+const TYPE_RANK = {
+  zscore: 10, flatline: 9, 'short-cycle': 9, 'trend-short': 8, 'trend-long': 8,
+  'routine-missing': 7, 'routine-deviation': 7, setback: 5, 'cycle-info': 4,
+  'routine-established': 3, 'routine-ambiguous': 2, 'cycle-insufficient': 1,
+};
+
+// Chooses the single most important insight to show on a sensor card.
+export function pickTopInsight(flags) {
+  let best = null;
+  let bestScore = -Infinity;
+  for (const flag of flags) {
+    const score = (SEVERITY_RANK[flag.severity] ?? 0) * 100 + (TYPE_RANK[flag.type] ?? 0);
+    if (score > bestScore) {
+      best = flag;
+      bestScore = score;
+    }
+  }
+  return best;
+}

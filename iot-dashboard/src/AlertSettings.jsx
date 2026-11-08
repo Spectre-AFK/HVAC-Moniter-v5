@@ -1,13 +1,13 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { BellRing, Loader2, CheckCircle2, ShieldAlert } from 'lucide-react';
 import { fetchPagedRows } from './history';
 import { validateThresholds } from './alertThresholds';
-import { shortDeviceId } from './sensors';
+import { buildSensorCatalog, sensorLabel } from './sensors';
 
 // Lets any signed-in user set high/low °F thresholds per sensor they can see. A Cloudflare
 // Worker cron job (see worker/index.js) checks these every few minutes and emails the owner
 // when a threshold is crossed, then again when the reading returns to normal.
-export default function AlertSettings({ supabase, sensors, userId }) {
+export default function AlertSettings({ supabase, sensors: accessibleSensors, userId, isAdmin = false, names = {} }) {
   const [rules, setRules] = useState({}); // sensorKey -> saved row from Supabase
   const [drafts, setDrafts] = useState({}); // sensorKey -> { high, low, enabled } as edited
   const [isLoading, setIsLoading] = useState(true);
@@ -41,6 +41,13 @@ export default function AlertSettings({ supabase, sensors, userId }) {
   }, [fetchRules]);
 
   const draftFor = (key) => drafts[key] ?? { high: '', low: '', enabled: true };
+  // Admins can manage alerts on any sensor, so their saved rules always stay editable.
+  const sensors = useMemo(() => (isAdmin
+    ? buildSensorCatalog([
+      ...accessibleSensors.map((s) => ({ device_id: s.deviceId, sensor_index: s.sensorIndex })),
+      ...Object.values(rules),
+    ], names)
+    : accessibleSensors), [isAdmin, accessibleSensors, rules, names]);
   const sensorKeys = new Set(sensors.map(sensor => sensor.key));
   const unlistedRules = Object.entries(rules).filter(([key]) => !sensorKeys.has(key));
 
@@ -143,7 +150,7 @@ export default function AlertSettings({ supabase, sensors, userId }) {
         {isLoading ? (
           <div className="p-6 text-sm text-slate-500 dark:text-slate-400">Loading...</div>
         ) : sensors.length === 0 ? (
-          <div className="p-6 text-sm text-slate-500 dark:text-slate-400">No sensors have reported data yet.</div>
+          <div className="p-6 text-sm text-slate-500 dark:text-slate-400">You don't have access to any sensors yet.</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -222,13 +229,13 @@ export default function AlertSettings({ supabase, sensors, userId }) {
       </div>
       {unlistedRules.length > 0 && (
         <section className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800">
-          <h2 className="font-semibold">Saved alerts outside the selected readings</h2>
+          <h2 className="font-semibold">Saved alerts for sensors you can no longer access</h2>
           <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-            These sensors have no readings in the selected range or their access was removed. You can still remove your saved rules.
+            Your access to these sensors was removed, so these alerts can't send emails. You can remove them.
           </p>
           <ul className="mt-3 space-y-3">
             {unlistedRules.map(([key, rule]) => {
-              const label = `Sensor ${rule.sensor_index} · Device ${shortDeviceId(rule.device_id)}`;
+              const label = sensorLabel(names, rule.device_id, rule.sensor_index);
               return <li key={key} className="flex flex-wrap gap-3 items-center justify-between text-sm">
                 <span>{label}</span>
                 <button disabled={savingKey !== null} aria-label={`Remove alert for ${label}`}

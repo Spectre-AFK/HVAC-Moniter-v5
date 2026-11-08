@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildDashboard, sensorStaleness } from './dashboard';
+import { buildDashboard, sensorStaleness, pickTopInsight } from './dashboard';
 import { convertCtoF } from './sensors';
 
 const now = Date.parse('2026-10-02T06:00:00Z');
@@ -27,5 +27,21 @@ describe('dashboard data model', () => {
     expect(sensorStaleness(dashboard, true, now + 20 * 60_000).a_0.isStale).toBe(false);
     expect(sensorStaleness(dashboard, true, now + 25 * 60_000 + 1).a_0.isStale).toBe(true);
     expect(sensorStaleness(dashboard, false, now)).toEqual({});
+  });
+});
+
+describe('pickTopInsight', () => {
+  it('prefers higher severity, then problems over informational notes', () => {
+    const flags = [
+      { type: 'cycle-insufficient', severity: 'low', message: 'sparse' },
+      { type: 'cycle-info', severity: 'low', message: 'cycles' },
+      { type: 'routine-deviation', severity: 'medium', message: 'late' },
+    ];
+    expect(pickTopInsight(flags).message).toBe('late');
+    expect(pickTopInsight(flags.slice(0, 2)).message).toBe('cycles');
+    expect(pickTopInsight([...flags, { type: 'zscore', severity: 'high', message: 'spike' }]).message).toBe('spike');
+  });
+  it('returns null when there are no insights', () => {
+    expect(pickTopInsight([])).toBeNull();
   });
 });

@@ -10,9 +10,9 @@ import logo from './assets/logo.png';
 import { detectRoutineDeviations } from './routineLearning';
 import { useTypewriter } from './useTypewriter';
 import { fetchPagedRows, loadSensorHistory } from './history';
-import { sensorKey as makeSensorKey, shortDeviceId, sensorColor,
+import { sensorKey as makeSensorKey, shortDeviceId, sensorColor, buildSensorCatalog,
   sensorNameLabel as getSensorNameLabel, sensorLabel as getSensorLabel } from './sensors';
-import { buildDashboard, sensorStaleness } from './dashboard';
+import { buildDashboard, sensorStaleness, pickTopInsight } from './dashboard';
 
 const AdminPanel = lazy(() => import('./AdminPanel'));
 const AlertSettings = lazy(() => import('./AlertSettings'));
@@ -108,6 +108,9 @@ function ConfiguredApp() {
   // Friendly name for each physical sensor (device_id + sensor_index), editable by admins only.
   // Only the "Sensor N" part is editable — the device suffix stays fixed for identification.
   const [sensorNames, setSensorNames] = useState({});
+  // Sensors known from names and access grants, so Admin and Alerts can list every sensor
+  // even when it has no readings in the dashboard's selected date range.
+  const [knownSensors, setKnownSensors] = useState([]);
   const [editingSensorKey, setEditingSensorKey] = useState(null);
   const [editingName, setEditingName] = useState('');
 
@@ -140,6 +143,7 @@ function ConfiguredApp() {
         userRef.current = nextId;
         setSensorHistory(null);
         setSensorNames({});
+        setKnownSensors([]);
         setHvacEvents([]);
         setView('dashboard');
         setEditingSensorKey(null);
@@ -223,13 +227,19 @@ function ConfiguredApp() {
 
   const fetchSensorNames = useCallback(async (signal) => {
     try {
-      const { rows, limitReached } = await fetchPagedRows(() => supabase.from('sensor_names').select('*')
-        .order('device_id').order('sensor_index'), { signal });
-      if (limitReached) throw new Error('Sensor name limit reached. Narrow the deployment or raise the configured limit.');
+      // Row-level security limits both tables to the user's granted sensors (all sensors for admins).
+      const [names, grants] = await Promise.all([
+        fetchPagedRows(() => supabase.from('sensor_names').select('*')
+          .order('device_id').order('sensor_index'), { signal }),
+        fetchPagedRows(() => supabase.from('device_permissions').select('device_id,sensor_index')
+          .order('device_id').order('sensor_index'), { signal }),
+      ]);
+      if (names.limitReached) throw new Error('Sensor name limit reached. Narrow the deployment or raise the configured limit.');
       if (signal.aborted || userRef.current !== userId) return;
       const map = {};
-      for (const row of rows) map[makeSensorKey(row.device_id, row.sensor_index)] = row.name;
+      for (const row of names.rows) map[makeSensorKey(row.device_id, row.sensor_index)] = row.name;
       setSensorNames(map);
+      setKnownSensors([...names.rows, ...grants.rows]);
       setNamesError('');
     } catch (error) {
       if (signal.aborted || userRef.current !== userId) return;
@@ -323,6 +333,12 @@ function ConfiguredApp() {
   // Builds per-sensor stats plus a single time-aligned chart series covering every sensor,
   // so the whole rig can be viewed together instead of switching between sensors one at a time.
   const dashboard = useMemo(() => buildDashboard(sensorData, sensorNames), [sensorData, sensorNames]);
+
+  const sensorCatalog = useMemo(() => buildSensorCatalog([
+    ...(dashboard?.perSensor ?? []).map((s) => ({ device_id: s.deviceId, sensor_index: s.sensorIndex })),
+    ...knownSensors,
+    ...hvacEvents,
+  ], sensorNames), [dashboard, knownSensors, hvacEvents, sensorNames]);
 
   const nowMinute = Math.floor(now / 60000);
   const routineFlags = useMemo(() => {
@@ -528,23 +544,15 @@ function ConfiguredApp() {
           <AdminPanel
             supabase={supabase}
             accessToken={session.access_token}
-            sensors={(dashboard?.perSensor ?? []).map((sensor) => ({
-              key: sensor.key,
-              deviceId: sensor.deviceId,
-              sensorIndex: sensor.sensorIndex,
-              label: sensorLabel(sensor.key, sensor.deviceId, sensor.sensorIndex),
-            }))}
+            sensors={sensorCatalog}
           />
         ) : view === 'alerts' ? (
           <AlertSettings
             supabase={supabase}
             userId={session.user.id}
-            sensors={(dashboard?.perSensor ?? []).map((sensor) => ({
-              key: sensor.key,
-              deviceId: sensor.deviceId,
-              sensorIndex: sensor.sensorIndex,
-              label: sensorLabel(sensor.key, sensor.deviceId, sensor.sensorIndex),
-            }))}
+            isAdmin={isAdmin}
+            names={sensorNames}
+            sensors={sensorCatalog}
           />
         ) : (
         <>
@@ -643,6 +651,8 @@ function ConfiguredApp() {
                 const isStale = stalenessBySensor[sensor.key]?.isStale;
                 const sensorAnomalies = dashboard.anomalies.filter((f) => f.key === sensor.key);
                 const sensorPatterns = [...dashboard.hvacPatterns, ...routineFlags].filter((f) => f.key === sensor.key);
+                const insight = pickTopInsight([...sensorAnomalies, ...sensorPatterns]);
+                const isWarning = insight && (insight.severity === 'high' || insight.severity === 'medium');
                 return (
                   <div
                     key={sensor.key}
@@ -743,37 +753,23 @@ function ConfiguredApp() {
                       </div>
                     </div>
 
-                    {sensorAnomalies.length > 0 && (
-                      <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800 space-y-1.5">
-                        {sensorAnomalies.map((flag, i) => (
-                          <div key={i} className="flex items-start gap-1.5 text-xs text-slate-600 dark:text-slate-400">
-                            {flag.type.startsWith('trend') ? (
-                              flag.message.includes(' up ') ? (
-                                <TrendingUp className="w-3.5 h-3.5 mt-0.5 text-red-500 shrink-0" />
-                              ) : (
-                                <TrendingDown className="w-3.5 h-3.5 mt-0.5 text-blue-500 shrink-0" />
-                              )
+                    {/* Only the most important insight is shown, to keep each card scannable */}
+                    {insight && (
+                      <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800">
+                        <div className="flex items-start gap-1.5 text-xs text-slate-600 dark:text-slate-400">
+                          {insight.type.startsWith('trend') ? (
+                            insight.message.includes(' up ') ? (
+                              <TrendingUp className="w-3.5 h-3.5 mt-0.5 text-red-500 shrink-0" />
                             ) : (
-                              <AlertTriangle className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${flag.severity === 'high' ? 'text-red-500' : 'text-amber-500'}`} />
-                            )}
-                            <span className="min-w-0 break-words">{flag.message}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {sensorPatterns.length > 0 && (
-                      <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800 space-y-1.5">
-                        {sensorPatterns.map((flag, i) => (
-                          <div key={i} className="flex items-start gap-1.5 text-xs text-slate-600 dark:text-slate-400">
-                            {flag.type === 'short-cycle' || flag.type === 'routine-deviation' || flag.type === 'routine-missing' ? (
-                              <AlertTriangle className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${flag.severity === 'high' ? 'text-red-500' : 'text-amber-500'}`} />
-                            ) : (
-                              <Activity className="w-3.5 h-3.5 mt-0.5 text-sky-500 shrink-0" />
-                            )}
-                            <span className="min-w-0 break-words">{flag.message}</span>
-                          </div>
-                        ))}
+                              <TrendingDown className="w-3.5 h-3.5 mt-0.5 text-blue-500 shrink-0" />
+                            )
+                          ) : isWarning ? (
+                            <AlertTriangle className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${insight.severity === 'high' ? 'text-red-500' : 'text-amber-500'}`} />
+                          ) : (
+                            <Activity className="w-3.5 h-3.5 mt-0.5 text-sky-500 shrink-0" />
+                          )}
+                          <span className="min-w-0 break-words">{insight.message}</span>
+                        </div>
                       </div>
                     )}
                   </div>

@@ -103,14 +103,59 @@ describe('dashboard lifecycle and accessible states', () => {
     expect(container.querySelector('input[aria-label^="High threshold"]')).not.toBeNull();
     expect(container.querySelector('input[aria-label^="Enable alerts"]')).not.toBeNull();
   });
-  it('keeps saved rules for absent sensors visible and removable', async () => {
+  it('keeps saved rules for sensors the user lost access to visible and removable', async () => {
     mocks.rows.sensor_data = [reading()];
     mocks.rows.alert_rules = [{ id: 'saved-rule', device_id: 'offline-device', sensor_index: 2, high_f: 85, low_f: null, enabled: true }];
     await render();
     await signIn();
     await act(async () => container.querySelector('[aria-label="Sensor Alerts"]').click());
     await waitForElement('button[aria-label^="Remove alert for Sensor 2"]');
-    expect(container.textContent).toContain('Saved alerts outside the selected readings');
+    expect(container.textContent).toContain('Saved alerts for sensors you can no longer access');
+  });
+  it('lists granted sensors with no readings in the selected range as editable alerts', async () => {
+    mocks.rows.sensor_data = [reading()];
+    mocks.rows.device_permissions = [{ device_id: 'quiet-device', sensor_index: 1 }];
+    mocks.rows.alert_rules = [{ id: 'quiet-rule', device_id: 'quiet-device', sensor_index: 1, high_f: 80, low_f: 60, enabled: true }];
+    await render();
+    await signIn();
+    await act(async () => container.querySelector('[aria-label="Sensor Alerts"]').click());
+    const low = await waitForElement('input[aria-label="Low threshold for Sensor 1 · Device VICE in degrees Fahrenheit"]');
+    expect(low.value).toBe('60');
+    expect(container.textContent).not.toContain('can no longer access');
+  });
+  it('keeps every saved alert editable for administrators', async () => {
+    mocks.rows.sensor_data = [reading()];
+    mocks.rows.alert_rules = [{ id: 'admin-rule', device_id: 'other-device', sensor_index: 3, high_f: 90, low_f: null, enabled: true }];
+    await render();
+    await signIn('admin-user', true);
+    await act(async () => container.querySelector('[aria-label="Sensor Alerts"]').click());
+    await waitForElement('input[aria-label^="High threshold for Sensor 3"]');
+    expect(container.textContent).not.toContain('can no longer access');
+  });
+  it('offers sensors without recent readings in the admin grant list', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ users: [] })));
+    mocks.rows.sensor_data = [reading()];
+    mocks.rows.sensor_names = [{ device_id: 'named-device', sensor_index: 4, name: 'Walk-in Cooler' }];
+    await render();
+    await signIn('admin-user', true);
+    await act(async () => container.querySelector('[aria-label="Admin: Device Access"]').click());
+    await waitForElement('#grant-sensor');
+    const options = [...container.querySelectorAll('#grant-sensor option')].map((option) => option.textContent);
+    expect(options).toContain('Walk-in Cooler · Device VICE');
+    expect(options).toContain('Sensor 0 · Device VICE');
+  });
+  it('shows only the most important insight on each sensor card', async () => {
+    const start = Date.now() - 6 * 60 * 60 * 1000;
+    // Steady readings then a sharp spike: produces several flags for one sensor.
+    mocks.rows.sensor_data = Array.from({ length: 120 }, (_, i) => ({
+      device_id: 'test-device', sensor_index: 0,
+      temperature_c: i === 119 ? 40 : 20 + (i % 2) * 0.1,
+      timestamp: new Date(start + i * 3 * 60 * 1000).toISOString(),
+    })).reverse();
+    await render();
+    await signIn();
+    const card = await waitForElement('.grid > div');
+    expect(card.querySelectorAll('.border-t .flex.items-start').length).toBeLessThanOrEqual(1);
   });
   it('selects an admin autocomplete result using ArrowDown and Enter', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ users: [{ id: '00000000-0000-4000-8000-000000000001', email: 'test@example.invalid' }], truncated: false })));
