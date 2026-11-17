@@ -24,6 +24,14 @@ beforeAll(async () => {
   await db.exec('create policy legacy_all_sensors on public.sensor_data for select to authenticated using (true)');
   await db.exec('grant all on alert_rules to public; grant update(is_triggered) on alert_rules to authenticated');
   await db.exec(readFileSync(new URL('../../supabase/migrations/20261002_monitoring_hardening.sql', import.meta.url), 'utf8'));
+  // Legacy production state the review migration has to repair.
+  await db.exec(`
+    alter table sensor_data alter column device_id drop not null;
+    insert into sensor_data(device_id,sensor_index,temperature_c,timestamp) values (null,0,21,now());
+    alter table device_permissions add constraint device_permissions_user_id_sensor_index_key unique (user_id, sensor_index);
+  `);
+  await db.exec(readFileSync(new URL('../../supabase/migrations/20261117052046_narrow_public_read_to_portfolio_sensor.sql', import.meta.url), 'utf8'));
+  await db.exec(readFileSync(new URL('../../supabase/migrations/20261117060000_database_review_fixes.sql', import.meta.url), 'utf8'));
   await db.exec(`
     insert into sensor_data(device_id,sensor_index,temperature_c,timestamp) values ('allowed',0,20,now()),('hidden',0,22,now());
     insert into sensor_names(device_id,sensor_index,name) values ('allowed',0,'Allowed'),('hidden',0,'Hidden');
@@ -49,8 +57,15 @@ describe('monitoring migration in PostgreSQL', () => {
     expect((await asUser(`select device_id from ${table}`, { id: otherId })).rows).toEqual([]);
     expect((await asUser(`select device_id from ${table}`, { admin: true })).rows).toHaveLength(2);
   });
-  it('denies anonymous reads and client ingestion', async () => {
-    await expect(asUser('select * from sensor_data', { role: 'anon' })).rejects.toThrow('permission denied');
+  it('lets anonymous visitors read only the portfolio sensor, and blocks client ingestion', async () => {
+    await db.exec("insert into sensor_data(device_id,sensor_index,temperature_c,timestamp) values ('20E7C8ECE5B4',0,23,now()),('20E7C8ECE5B4',1,30,now())");
+    try {
+      const { rows } = await asUser('select device_id, sensor_index from sensor_data', { role: 'anon' });
+      expect(rows).toEqual([{ device_id: '20E7C8ECE5B4', sensor_index: 0 }]);
+    } finally {
+      await db.exec("delete from sensor_data where device_id = '20E7C8ECE5B4'");
+    }
+    await expect(asUser('select * from sensor_names', { role: 'anon' })).rejects.toThrow('permission denied');
     await expect(asUser("insert into sensor_data(device_id,sensor_index,temperature_c,timestamp) values('allowed',0,20,now())")).rejects.toThrow('permission denied');
   });
   it('allows an owned rule for a granted sensor', async () => {
@@ -81,6 +96,28 @@ describe('monitoring migration in PostgreSQL', () => {
   });
   it('preserves trusted ingestion privileges', async () => {
     await asUser("insert into sensor_data(device_id,sensor_index,temperature_c,timestamp) values('backend-test',0,20,now())", { role: 'service_role' });
+  });
+  it('archives readings without a device and then requires a device', async () => {
+    expect((await db.query('select count(*)::int as count from archive.sensor_data_unassigned')).rows[0].count).toBe(1);
+    expect((await db.query('select count(*)::int as count from sensor_data where device_id is null')).rows[0].count).toBe(0);
+    await expect(asUser('insert into sensor_data(sensor_index,temperature_c,timestamp) values(0,20,now())', { role: 'service_role' })).rejects.toThrow('null value');
+  });
+  it('lets an admin grant the same sensor number on two devices', async () => {
+    await asUser(`insert into device_permissions(user_id,device_id,sensor_index) values('${userId}','second-device',0)`, { admin: true });
+    expect((await asUser('select device_id from device_permissions order by device_id')).rows.map(r => r.device_id)).toEqual(['allowed', 'second-device']);
+    await db.exec("delete from device_permissions where device_id = 'second-device'");
+  });
+  it('resets alert state when a rule is switched on or off or its thresholds change', async () => {
+    await db.exec('update alert_rules set is_triggered = true, last_notified_at = now()');
+    await asUser('update alert_rules set high_f = high_f');
+    expect((await db.query('select is_triggered from alert_rules')).rows[0].is_triggered).toBe(true);
+    await asUser('update alert_rules set enabled = false');
+    const { rows } = await db.query('select is_triggered, last_notified_at from alert_rules');
+    expect(rows[0]).toEqual({ is_triggered: false, last_notified_at: null });
+  });
+  it('can reapply the review migration safely', async () => {
+    await db.exec(readFileSync(new URL('../../supabase/migrations/20261117060000_database_review_fixes.sql', import.meta.url), 'utf8'));
+    expect((await db.query('select count(*)::int as count from archive.sensor_data_unassigned')).rows[0].count).toBe(1);
   });
   it('can be reapplied without duplicate policies or indexes', async () => {
     await db.exec(readFileSync(new URL('../../supabase/migrations/20261002_monitoring_hardening.sql', import.meta.url), 'utf8'));

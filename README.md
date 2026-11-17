@@ -32,7 +32,14 @@ Fill in the local files, which are git-ignored. Never place a service-role key i
 1. For a new project, run [supabase/schema.sql](supabase/schema.sql) in the SQL editor.
    Existing tables are not replaced. Bootstrap tables are fail-closed until policies are applied.
 2. Review and run [the hardening migration](supabase/migrations/20261002_monitoring_hardening.sql).
-3. Run [supabase/verify_rls.sql](supabase/verify_rls.sql) and inspect every result.
+3. Run the later migrations in filename order:
+   [portfolio public read](supabase/migrations/20261117052046_narrow_public_read_to_portfolio_sensor.sql)
+   lets signed-out visitors read one portfolio probe, and
+   [review fixes](supabase/migrations/20261117060000_database_review_fixes.sql) archives
+   readings with no device into `archive.sensor_data_unassigned`, resets alert state when a
+   rule changes, locks down helper functions and speeds up the access policies. Both are safe
+   to re-run.
+4. Run [supabase/verify_rls.sql](supabase/verify_rls.sql) and inspect every result.
 
 **The migration replaces every policy on the five monitoring tables.** Review custom
 policies before applying it. It leaves unrelated tables alone and runs in a transaction.
